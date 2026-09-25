@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, useCallback, Re
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { canMakeVoiceCall, canMakeVideoCall, callPermissionDenialMessage } from "@/lib/callPermissions";
 
 export type CallType = "voice" | "video";
 export type CallState = "idle" | "calling" | "ringing" | "connected" | "ended";
@@ -129,6 +130,16 @@ export function CallProvider({ children }: { children: ReactNode }) {
   useEffect(() => { callTypeRef.current = callType; }, [callType]);
   useEffect(() => { incomingCallRef.current = incomingCall; }, [incomingCall]);
   useEffect(() => { callRoomIdRef.current = callRoomId; }, [callRoomId]);
+
+  const rankRef = useRef<string | null | undefined>(profile?.rank);
+  useEffect(() => { rankRef.current = profile?.rank; }, [profile?.rank]);
+
+  // Enforced here (not just in the UI) so nothing — a stale button, a
+  // deep-linked /call/:id, or a group "add participant" — can start or
+  // accept a call type the current rank isn't allowed to use.
+  const hasCallPermission = useCallback((type: CallType) => {
+    return type === "video" ? canMakeVideoCall(rankRef.current) : canMakeVoiceCall(rankRef.current);
+  }, []);
 
   // ---------- Ringtone helpers ----------
   const stopRingtone = useCallback(() => {
@@ -476,6 +487,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
   // ---------- Start a call (initiator) ----------
   const startCall = useCallback(async (roomId: string, peerId: string, peerName: string, type: CallType) => {
     if (!user || callStateRef.current !== "idle") return;
+    if (!hasCallPermission(type)) {
+      toast.error(callPermissionDenialMessage(type));
+      return;
+    }
 
     const callId = `${roomId}-${Date.now()}`;
     callIdRef.current = callId;
@@ -566,11 +581,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
       handleMediaError(err, type);
       cleanup();
     }
-  }, [user, profile, stopRingtone, playLoopingAudio, ensureLocalStream, subscribeCallChannel, createPeer, cleanup]);
+  }, [user, profile, hasCallPermission, stopRingtone, playLoopingAudio, ensureLocalStream, subscribeCallChannel, createPeer, cleanup]);
 
   // ---------- Add another participant (mesh, max 4 total) ----------
   const addParticipant = useCallback(async (peerId: string, peerName: string) => {
     if (!user || callStateRef.current === "idle") return;
+    if (!hasCallPermission(callTypeRef.current)) {
+      toast.error(callPermissionDenialMessage(callTypeRef.current));
+      return;
+    }
     if (peersRef.current.size >= MAX_PARTICIPANTS) {
       toast.error(`Group call is limited to ${MAX_PARTICIPANTS + 1} people.`);
       return;
@@ -626,11 +645,31 @@ export function CallProvider({ children }: { children: ReactNode }) {
       createPeer(peerId, peerName);
       toast.success(`Inviting ${peerName} to call…`);
     } catch (err) { console.error("addParticipant:", err); }
-  }, [user, profile, callRoomId, createPeer]);
+  }, [user, profile, callRoomId, hasCallPermission, createPeer]);
 
   // ---------- Answer (callee) ----------
   const answerCall = useCallback(async () => {
     if (!incomingCall || !user) return;
+    if (!hasCallPermission(incomingCall.type)) {
+      // Rank doesn't permit this call type on the receiving side either —
+      // decline automatically rather than letting it connect.
+      toast.error(callPermissionDenialMessage(incomingCall.type));
+      stopRingtone();
+      markCallHandled(incomingCall.callId);
+      closeCallNotifications(incomingCall.roomId, incomingCall.callId);
+      const dm = dmChannelsRef.current.get(incomingCall.roomId);
+      dm?.send({ type: "broadcast", event: "call-reject", payload: { callId: incomingCall.callId, from: user.id } });
+      void supabase.from("call_logs").insert({
+        room_id: incomingCall.roomId,
+        caller_id: incomingCall.from,
+        callee_id: user.id,
+        call_type: incomingCall.type,
+        status: "declined",
+        duration_seconds: 0,
+      });
+      cleanup();
+      return;
+    }
     const answeringCall = incomingCall;
     markCallHandled(answeringCall.callId);
     closeCallNotifications(answeringCall.roomId, answeringCall.callId);
@@ -676,7 +715,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       handleMediaError(err, type);
       cleanup();
     }
-  }, [incomingCall, user, profile, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, subscribeCallChannel, createPeer, sendSignal, cleanup]);
+  }, [incomingCall, user, profile, hasCallPermission, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, subscribeCallChannel, createPeer, sendSignal, cleanup]);
 
   const endCall = useCallback(() => {
     const activeRoomId = callRoomIdRef.current;
@@ -831,6 +870,22 @@ export function CallProvider({ children }: { children: ReactNode }) {
           if (handledCallIdsRef.current.has(p.callId)) return;
           if (callStateRef.current !== "idle") return;
           if (incomingCallRef.current?.callId === p.callId) return;
+          if (!hasCallPermission(p.callType)) {
+            // Don't even ring — this rank isn't allowed to receive this call type.
+            // Decline immediately so the caller isn't left hanging.
+            markCallHandled(p.callId);
+            void supabase.from("call_logs").insert({
+              room_id: p.roomId,
+              caller_id: p.from,
+              callee_id: user.id,
+              call_type: p.callType,
+              status: "declined",
+              duration_seconds: 0,
+            });
+            const dm = dmChannelsRef.current.get(p.roomId);
+            dm?.send({ type: "broadcast", event: "call-reject", payload: { callId: p.callId, from: user.id } });
+            return;
+          }
           callIdRef.current = p.callId;
           if (p.sdp) {
             const entry = createPeer(p.from, p.name || "User");
@@ -883,7 +938,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       channels.clear();
       stopRingtone();
     };
-  }, [user, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, createPeer, cleanup]);
+  }, [user, hasCallPermission, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, createPeer, cleanup]);
 
   return (
     <CallContext.Provider value={{

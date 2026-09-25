@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { blockUser, submitModerationReport } from "@/lib/safety";
 import { Textarea } from "@/components/ui/textarea";
+import { canMakeVoiceCall, canMakeVideoCall } from "@/lib/callPermissions";
 
 type Message = Tables<"messages"> & { edited_at?: string | null; reply_to?: string | null };
 type CallLog = Tables<"call_logs">;
@@ -51,8 +52,6 @@ interface ReplyTarget {
   type: string;
 }
 
-const VOICE_RANKS = ["Novice", "Learner", "Professional", "Expert", "Master"];
-const VIDEO_RANKS = ["Professional", "Expert", "Master"];
 const VIDEO_UPLOAD_RANKS = ["Professional", "Expert", "Master"];
 
 export default function ChatRoomPage() {
@@ -74,6 +73,7 @@ export default function ChatRoomPage() {
   const [memberCount, setMemberCount] = useState(0);
   const [onlineCount, setOnlineCount] = useState(0);
   const [dmPeer, setDmPeer] = useState<UserSummary | null>(null);
+  const [peerLastReadAt, setPeerLastReadAt] = useState<string | null>(null);
   const [pinnedMessages, setPinnedMessages] = useState<MessageWithProfile[]>([]);
   const [showPinned, setShowPinned] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
@@ -93,8 +93,8 @@ export default function ChatRoomPage() {
   const { typingUsers, broadcastTyping } = useTypingIndicator(roomId);
 
   const userRank = profile?.rank || "Amateur";
-  const canVoiceCall = VOICE_RANKS.includes(userRank);
-  const canVideoCall = VIDEO_RANKS.includes(userRank);
+  const canVoiceCall = canMakeVoiceCall(userRank);
+  const canVideoCall = canMakeVideoCall(userRank);
   const canUploadVideo = VIDEO_UPLOAD_RANKS.includes(userRank);
 
   const call = useCallContext();
@@ -188,6 +188,14 @@ export default function ChatRoomPage() {
         (payload) => {
           const log = payload.new as CallLog;
           setCallLogs((prev) => prev.map((item) => item.id === log.id ? log : item));
+        })
+      .on("postgres_changes", { event: "*", schema: "public", table: "room_reads", filter: `room_id=eq.${roomId}` },
+        (payload) => {
+          // Live read-receipt ticks: only care about the *other* member's read cursor.
+          const row = (payload.new || payload.old) as { user_id: string; last_read_at: string } | null;
+          if (!row || row.user_id === user.id) return;
+          const updated = (payload.new as { last_read_at?: string } | null)?.last_read_at;
+          if (updated) setPeerLastReadAt(updated);
         })
       .subscribe();
 
@@ -287,7 +295,21 @@ export default function ChatRoomPage() {
     const memberIds = members.map((m) => m.user_id);
     const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, avatar_url, username, rank, is_online, last_seen").in("user_id", memberIds);
     setOnlineCount(profiles?.filter((p) => p.is_online).length || 0);
-    if (data?.type === "dm") setDmPeer((profiles || []).find((p) => p.user_id !== user.id) || null);
+    if (data?.type === "dm") {
+      const peer = (profiles || []).find((p) => p.user_id !== user.id) || null;
+      setDmPeer(peer);
+      // WhatsApp-style read receipts: know when the peer last read this DM so
+      // we can flip our own outgoing ticks from sent -> read.
+      if (peer) {
+        const { data: peerRead } = await supabase
+          .from("room_reads")
+          .select("last_read_at")
+          .eq("room_id", roomId)
+          .eq("user_id", peer.user_id)
+          .maybeSingle();
+        setPeerLastReadAt(peerRead?.last_read_at || null);
+      }
+    }
 
     // Check mute status
     const { data: muteData } = await supabase.from("muted_members").select("id").eq("room_id", roomId).eq("user_id", user.id).maybeSingle();
@@ -665,6 +687,26 @@ export default function ChatRoomPage() {
     setReportTarget(null);
   };
 
+  // WhatsApp-style day divider label ("Today" / "Yesterday" / "3 March").
+  const formatDayDivider = (dateStr: string) => {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(now.getDate() - 1);
+    const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
+    if (sameDay(d, now)) return "Today";
+    if (sameDay(d, yesterday)) return "Yesterday";
+    return d.toLocaleDateString([], {
+      day: "numeric",
+      month: "long",
+      year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
+    });
+  };
+
+  // Consecutive messages from the same sender within this window are grouped
+  // together (no repeated avatar/name, tighter spacing) like WhatsApp.
+  const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
   const roomTitle = room?.type === "dm" ? dmPeer?.display_name || dmPeer?.username || "Direct Message" : room?.name || "Loading...";
   const isAnnouncementRoom = room?.name === "📢 4GO Announcements";
   const roomSubtitle = room?.type === "dm" ? (dmPeer?.is_online ? "Online now" : "Offline") : `${memberCount} members · ${onlineCount} online`;
@@ -756,7 +798,7 @@ export default function ChatRoomPage() {
       {/* Messages */}
       <div
         ref={messagesContainerRef}
-        className="flex-1 overflow-y-auto px-4 py-3 space-y-2"
+        className="flex-1 overflow-y-auto px-4 py-3"
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollTop < 100 && hasMore && !loadingMore) {
@@ -771,11 +813,53 @@ export default function ChatRoomPage() {
         )}
         {(() => {
           let newDividerShown = false;
+          let prevDateKey: string | null = null;
+          let prevMessageEntry: { created_at: string; item: MessageWithProfile } | null = null;
+
           return conversationItems.map((entry) => {
             const isUnread = lastReadAt && entry.created_at > lastReadAt && (entry.kind !== "message" || entry.item.sender_id !== user?.id) && !newDividerShown;
             if (isUnread) newDividerShown = true;
+
+            const dateKey = new Date(entry.created_at).toDateString();
+            const showDateDivider = dateKey !== prevDateKey;
+            if (showDateDivider) {
+              prevDateKey = dateKey;
+              prevMessageEntry = null; // grouping never spans a day boundary
+            }
+
+            let showHeader = true;
+            let grouped = false;
+            let status: "sent" | "delivered" | "read" | undefined;
+
+            if (entry.kind === "message") {
+              const sameSenderRecently =
+                !!prevMessageEntry &&
+                prevMessageEntry.item.sender_id === entry.item.sender_id &&
+                new Date(entry.created_at).getTime() - new Date(prevMessageEntry.created_at).getTime() < GROUP_WINDOW_MS;
+              showHeader = !sameSenderRecently;
+              grouped = sameSenderRecently;
+
+              if (entry.item.sender_id === user?.id) {
+                if (room?.type === "dm") {
+                  status = peerLastReadAt && entry.created_at <= peerLastReadAt ? "read" : "delivered";
+                } else {
+                  status = "delivered";
+                }
+              }
+              prevMessageEntry = entry;
+            } else {
+              prevMessageEntry = null; // a call log also breaks visual grouping
+            }
+
             return (
               <div key={`${entry.kind}-${entry.item.id}`}>
+                {showDateDivider && (
+                  <div className="flex items-center justify-center py-2">
+                    <span className="text-[10px] font-semibold text-muted-foreground bg-muted rounded-full px-3 py-1 shadow-sm">
+                      {formatDayDivider(entry.created_at)}
+                    </span>
+                  </div>
+                )}
                 {isUnread && (
                   <div id="unread-divider" className="flex items-center gap-2 py-2">
                     <div className="flex-1 h-px bg-destructive/50" />
@@ -804,6 +888,9 @@ export default function ChatRoomPage() {
                       isPinned={pinnedMessages.some((pm) => pm.id === entry.item.id)}
                       replyInfo={replyMap.get(entry.item.id) || null}
                       onScrollToMessage={scrollToMessage}
+                      status={status}
+                      showHeader={showHeader}
+                      grouped={grouped}
                     />
                   </div>
                 )}

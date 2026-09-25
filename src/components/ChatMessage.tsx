@@ -6,7 +6,7 @@ import MessageReactions from "@/components/MessageReactions";
 import { Tables } from "@/integrations/supabase/types";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
-import { Check, CornerUpLeft, Eye, Flag, Gift, Mic, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";
+import { Check, CheckCheck, CornerUpLeft, Eye, Flag, Gift, Mic, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";
 import { RankBadge } from "./RankBadge";
 import UserAvatar from "./UserAvatar";
 import UserProfilePreview from "./UserProfilePreview";
@@ -49,9 +49,15 @@ interface ChatMessageProps {
   isPinned?: boolean;
   replyInfo?: ReplyInfo | null;
   onScrollToMessage?: (messageId: string) => void;
+  /** WhatsApp-style ticks for the sender's own outgoing messages. */
+  status?: "sent" | "delivered" | "read";
+  /** Whether this is the first bubble in a run of consecutive messages from the same sender — shows name/avatar. */
+  showHeader?: boolean;
+  /** Whether this bubble is tucked into a run of consecutive messages from the same sender — tighter spacing. */
+  grouped?: boolean;
 }
 
-export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, onDelete, onReport, onBlockUser, onPin, onReply, isPinned, replyInfo, onScrollToMessage }: ChatMessageProps) {
+export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, onDelete, onReport, onBlockUser, onPin, onReply, isPinned, replyInfo, onScrollToMessage, status, showHeader = true, grouped = false }: ChatMessageProps) {
   const { user } = useAuth();
   const time = new Date(message.created_at).toLocaleTimeString([], {
     hour: "2-digit",
@@ -142,15 +148,17 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
   ) : null;
 
   return (
-    <div className={`flex ${isOwn ? "justify-end" : "justify-start"} animate-fade-in`}>
+    <div className={`flex ${isOwn ? "justify-end" : "justify-start"} ${grouped ? "mt-0.5" : "mt-2"} animate-fade-in`}>
       {!isOwn && (
-        <button onClick={() => setShowProfile(true)} className="shrink-0">
-          <UserAvatar name={message.profile?.display_name || message.profile?.username} url={message.profile?.avatar_url} size="sm" className="mr-2 mt-5" />
+        <button onClick={() => setShowProfile(true)} className="shrink-0 w-8 mr-2 self-end">
+          {showHeader && (
+            <UserAvatar name={message.profile?.display_name || message.profile?.username} url={message.profile?.avatar_url} size="sm" />
+          )}
         </button>
       )}
 
       <div className={`max-w-[80%] ${isOwn ? "items-end" : "items-start"}`}>
-        {!isOwn && (
+        {!isOwn && showHeader && (
           <div className="flex items-center gap-1.5 mb-0.5 ml-1">
             <p className="text-[10px] text-primary font-semibold">{message.profile?.display_name || "User"}</p>
             {isSupportAgent(message.profile?.username) && <VerifiedBadge className="w-3 h-3" />}
@@ -158,7 +166,7 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
             <RankBadge rank={message.profile?.rank || "Amateur"} size="sm" showLabel={false} />
           </div>
         )}
-        <div className={`rounded-2xl px-3 py-2 relative ${isOwn ? "bubble-sent rounded-br-md" : "bubble-received rounded-bl-md shadow-card"}`}>
+        <div className={`rounded-2xl px-3 py-2 relative ${isOwn ? `bubble-sent ${grouped ? "rounded-br-2xl" : "rounded-br-md"}` : `bubble-received shadow-card ${grouped ? "rounded-bl-2xl" : "rounded-bl-md"}`}`}>
           {isPinned && <div className="absolute -top-2 right-2"><Pin className="w-3 h-3 text-primary" /></div>}
           <div className="mb-1 flex items-start justify-end gap-2">
             <div className="flex-1" />
@@ -234,7 +242,18 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
                 </span>
               )}
             </div>
-            <p className="text-[9px] text-muted-foreground text-right flex-1">{message.edited_at ? "edited • " : ""}{time}</p>
+            <p className="text-[9px] text-muted-foreground text-right flex-1 flex items-center justify-end gap-0.5">
+              {message.edited_at ? "edited • " : ""}{time}
+              {isOwn && status && (
+                status === "read" ? (
+                  <CheckCheck className="w-3.5 h-3.5 text-sky-500" aria-label="Read" />
+                ) : status === "delivered" ? (
+                  <CheckCheck className="w-3.5 h-3.5 text-muted-foreground" aria-label="Delivered" />
+                ) : (
+                  <Check className="w-3.5 h-3.5 text-muted-foreground" aria-label="Sent" />
+                )
+              )}
+            </p>
           </div>
         </div>
         {message.type !== "system" && (
