@@ -27,7 +27,7 @@ export default function PagePostViewPage() {
       const { data: page } = await supabase
         .from("pages")
         .select("name, profile_image")
-        .eq("id", (data as any).page_id)
+        .eq("id", data.page_id)
         .maybeSingle();
       let isLiked = false, isSaved = false;
       if (user) {
@@ -37,7 +37,7 @@ export default function PagePostViewPage() {
         isSaved = !!save;
       }
       setPost({
-        ...(data as any),
+        ...data,
         page_name: page?.name ?? null,
         page_avatar: page?.profile_image ?? null,
         is_followed: false,
@@ -47,6 +47,8 @@ export default function PagePostViewPage() {
       });
       setLoading(false);
     })();
+    // user?.id (primitive) used deliberately to avoid re-fetching on every auth refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [postId, user?.id]);
 
   return (

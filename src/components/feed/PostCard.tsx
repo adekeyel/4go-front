@@ -75,7 +75,7 @@ const PostCard = forwardRef<HTMLDivElement, PostCardProps>(function PostCard(
         p_post_id: post.id,
       });
       if (error) throw error;
-      onLikeToggle(post.id, (data as any).liked);
+      onLikeToggle(post.id, (data as { liked: boolean }).liked);
     } catch {
       setLiked(!newLiked);
       setLikesCount((c) => c + (newLiked ? -1 : 1));

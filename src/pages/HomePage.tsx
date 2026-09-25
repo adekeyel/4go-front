@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -46,11 +46,7 @@ export default function HomePage() {
   const [pendingRoomId, setPendingRoomId] = useState<string | null>(null);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    fetchRooms();
-  }, [user]);
-
-  const fetchRooms = async () => {
+  const fetchRooms = useCallback(async () => {
     const [roomsResult, userMembershipsResult] = await Promise.all([
       supabase
         .from("rooms")
@@ -88,7 +84,11 @@ export default function HomePage() {
     setMyRooms(enriched.filter((r) => userRoomIds.includes(r.id)));
 
     setLoading(false);
-  };
+  }, [user]);
+
+  useEffect(() => {
+    fetchRooms();
+  }, [user, fetchRooms]);
 
   const isNewUser = myRooms.length === 0;
   const displayedRooms = isNewUser ? rooms.slice(0, 4) : myRooms.slice(0, 4);
@@ -102,7 +102,9 @@ export default function HomePage() {
     if (navigator.share) {
       try {
         await navigator.share({ title: "Join 4GO", text: shareText });
-      } catch {}
+      } catch {
+        // user dismissed the native share sheet
+      }
     } else {
       await navigator.clipboard.writeText(shareText);
     }

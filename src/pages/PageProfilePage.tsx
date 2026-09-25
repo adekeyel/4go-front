@@ -34,17 +34,19 @@ export default function PageProfilePage() {
   const [posts, setPosts] = useState<PagePostCardData[]>([]);
   const [boostPostId, setBoostPostId] = useState<string | null>(null);
   const [tab, setTab] = useState<"posts" | "followers" | "following">("posts");
-  const [followers, setFollowers] = useState<any[]>([]);
-  const [followingPages, setFollowingPages] = useState<any[]>([]);
+  const [followers, setFollowers] = useState<{ user_id: string; display_name: string | null; username: string | null; avatar_url: string | null }[]>([]);
+  const [followingPages, setFollowingPages] = useState<{ id: string; name: string; profile_image: string | null; category: string | null }[]>([]);
 
   const isOwner = !!user && page?.owner_id === user.id;
 
-  useEffect(() => { if (pageId) load(); /* eslint-disable-next-line */ }, [pageId, user]);
+  // Runs once per pageId/user change; load() also fetches posts via loadPosts()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (pageId) load(); }, [pageId, user]);
 
   const load = async () => {
     setLoading(true);
     const { data: p } = await supabase.from("pages").select("*").eq("id", pageId!).maybeSingle();
-    setPage((p as any) ?? null);
+    setPage(p ?? null);
     if (user && p) {
       const { data: f } = await supabase
         .from("page_followers")
@@ -64,7 +66,7 @@ export default function PageProfilePage() {
       .select("user_id")
       .eq("page_id", pageId!)
       .limit(200);
-    const ids = (rows ?? []).map((r: any) => r.user_id);
+    const ids = (rows ?? []).map((r) => r.user_id);
     if (ids.length === 0) { setFollowers([]); return; }
     const { data: profs } = await supabase
       .from("profiles")
@@ -79,7 +81,7 @@ export default function PageProfilePage() {
       .from("page_followers")
       .select("page_id")
       .eq("user_id", page.owner_id);
-    const ids = (follows ?? []).map((f: any) => f.page_id);
+    const ids = (follows ?? []).map((f) => f.page_id);
     if (ids.length === 0) { setFollowingPages([]); return; }
     const { data: pgs } = await supabase
       .from("pages")
@@ -108,16 +110,16 @@ export default function PageProfilePage() {
         .from("post_saves")
         .select("post_id")
         .eq("user_id", user.id)
-        .in("post_id", (data as any[]).map((d) => d.id));
-      savedIds = new Set((saves ?? []).map((s: any) => s.post_id));
+        .in("post_id", data.map((d) => d.id));
+      savedIds = new Set((saves ?? []).map((s) => s.post_id));
     }
     setPosts(
-      (data as any[]).map((d) => ({
+      data.map((d) => ({
         ...d,
         page_name: page?.name ?? null,
         page_avatar: page?.profile_image ?? null,
         is_saved: savedIds.has(d.id),
-      })) as PagePostCardData[]
+      }))
     );
   };
 

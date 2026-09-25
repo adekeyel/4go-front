@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -11,6 +11,9 @@ import { toast } from "sonner";
 import UserAvatar from "@/components/UserAvatar";
 import { RankBadge } from "@/components/RankBadge";
 import { getBankName } from "@/lib/banks";
+import type { Tables } from "@/integrations/supabase/types";
+
+type VerificationApplication = Tables<"verification_applications">;
 
 interface UserProfile {
   user_id: string;
@@ -134,7 +137,7 @@ export default function AdminPage() {
   const [activityLoading, setActivityLoading] = useState(false);
 
   // Verifications tab
-  const [verifications, setVerifications] = useState<any[]>([]);
+  const [verifications, setVerifications] = useState<(VerificationApplication & { profile?: UserProfile })[]>([]);
   const [verifLoading, setVerifLoading] = useState(false);
   const [verifNotes, setVerifNotes] = useState<Record<string, string>>({});
 
@@ -145,27 +148,29 @@ export default function AdminPage() {
       .select("*")
       .order("created_at", { ascending: false })
       .limit(200);
-    const ids = Array.from(new Set((apps || []).map((a: any) => a.user_id)));
-    let profMap = new Map<string, any>();
+    const ids = Array.from(new Set((apps || []).map((a) => a.user_id)));
+    const profMap = new Map<string, UserProfile>();
     if (ids.length) {
       const { data: profs } = await supabase
         .from("profiles")
         .select("user_id, display_name, username, avatar_url, rank")
-        .in("user_id", ids as any);
-      (profs || []).forEach((p: any) => profMap.set(p.user_id, p));
+        .in("user_id", ids);
+      (profs || []).forEach((p) => profMap.set(p.user_id, p as UserProfile));
     }
-    setVerifications((apps || []).map((a: any) => ({ ...a, profile: profMap.get(a.user_id) })));
+    setVerifications((apps || []).map((a) => ({ ...a, profile: profMap.get(a.user_id) })));
     setVerifLoading(false);
   };
 
   const reviewVerification = async (id: string, action: "approve" | "reject") => {
     const notes = verifNotes[id]?.trim() || null;
-    const fn = action === "approve" ? "approve_verification" : "reject_verification";
-    const { error } = await supabase.rpc(fn as any, {
-      p_admin_id: user!.id,
-      p_application_id: id,
-      p_notes: notes,
-    } as any);
+    const { error } = await supabase.rpc(
+      action === "approve" ? "approve_verification" : "reject_verification",
+      {
+        p_admin_id: user!.id,
+        p_application_id: id,
+        p_notes: notes,
+      }
+    );
     if (error) { toast.error(error.message || "Failed"); return; }
     toast.success(action === "approve" ? "Verified" : "Rejected & refunded");
     void loadVerifications();
@@ -179,7 +184,7 @@ export default function AdminPage() {
       message: notifMessage.trim(),
       priority: notifPriority,
       sent_by: user!.id,
-    } as any);
+    });
     setSendingNotif(false);
     if (error) { toast.error("Failed to send notification"); return; }
     setNotifTitle("");
@@ -188,12 +193,7 @@ export default function AdminPage() {
     toast.success("Notification sent to all users!");
   };
 
-  useEffect(() => {
-    if (!user) return;
-    checkAdmin();
-  }, [user]);
-
-  const checkAdmin = async () => {
+  const checkAdmin = useCallback(async () => {
     const { data } = await supabase.rpc("is_super_admin", { p_user_id: user!.id });
     if (!data) {
       setIsAdmin(false);
@@ -201,7 +201,12 @@ export default function AdminPage() {
     }
     setIsAdmin(true);
     loadAllData();
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    checkAdmin();
+  }, [user, checkAdmin]);
 
   const loadAllData = async () => {
     const [usersRes, reportsRes, withdrawalsRes, roomsRes, contestsRes, pagesRes] = await Promise.all([
@@ -209,7 +214,7 @@ export default function AdminPage() {
       supabase.from("moderation_reports").select("*").order("created_at", { ascending: false }).limit(200),
       supabase.from("withdrawals").select("*").order("created_at", { ascending: false }).limit(200),
       supabase.from("rooms").select("id, name, type, created_at, is_active").neq("type", "dm").order("created_at", { ascending: false }).limit(200),
-      supabase.from("contests").select("*").order("created_at", { ascending: false }) as any,
+      supabase.from("contests").select("*").order("created_at", { ascending: false }),
       supabase.from("pages").select("id, name, category, followers_count, owner_id, created_at, profile_image").order("created_at", { ascending: false }).limit(200),
     ]);
 
@@ -223,7 +228,7 @@ export default function AdminPage() {
     setReports(r);
     setWithdrawals(w);
     setRooms(rm);
-    setPages(((pagesRes as any).data || []) as PageRow[]);
+    setPages((pagesRes.data || []) as PageRow[]);
     setContests(c);
     setStats({
       totalUsers: u.length,
@@ -243,7 +248,7 @@ export default function AdminPage() {
 
   const processWithdrawal = async (id: string, action: "approved" | "rejected") => {
     if (action === "approved") {
-      await supabase.from("withdrawals").update({ status: "approved" } as any).eq("id", id);
+      await supabase.from("withdrawals").update({ status: "approved" }).eq("id", id);
       const { data: processResult, error } = await supabase.functions.invoke("process-withdrawal", { body: { withdrawalId: id } });
       if (error || !processResult?.success) {
         toast.error(processResult?.error || "Failed to process withdrawal via payment provider");
@@ -259,7 +264,7 @@ export default function AdminPage() {
           p_description: "Withdrawal rejected by admin",
         });
       }
-      await supabase.from("withdrawals").update({ status: "rejected" } as any).eq("id", id);
+      await supabase.from("withdrawals").update({ status: "rejected" }).eq("id", id);
       toast.success("Withdrawal rejected & coins refunded");
     }
     setWithdrawals(prev => prev.map(w => w.id === id ? { ...w, status: action } : w));
@@ -282,7 +287,7 @@ export default function AdminPage() {
   };
 
   const toggleMonetization = async (userId: string, current: boolean) => {
-    const { error } = await supabase.from("profiles").update({ is_monetized: !current } as any).eq("user_id", userId);
+    const { error } = await supabase.from("profiles").update({ is_monetized: !current }).eq("user_id", userId);
     if (error) { toast.error("Failed"); return; }
     setUsers(prev => prev.map(u => u.user_id === userId ? { ...u, is_monetized: !current } : u));
     toast.success(!current ? "User monetized" : "Monetization removed");
@@ -292,7 +297,7 @@ export default function AdminPage() {
     setActivityLoading(true);
     const { data, error } = await supabase.rpc("admin_get_chat_activity", {
       p_admin_id: user!.id, p_days: 7, p_limit: 100,
-    } as any);
+    });
     setActivityLoading(false);
     if (error) { toast.error("Failed to load activity"); return; }
     setChatActivity((data || []) as ChatActivityRow[]);
@@ -300,12 +305,12 @@ export default function AdminPage() {
 
   const suspendUser = async (userId: string, currentlySuspended: boolean) => {
     if (currentlySuspended) {
-      const { error } = await supabase.rpc("admin_unsuspend_user", { p_admin_id: user!.id, p_user_id: userId } as any);
+      const { error } = await supabase.rpc("admin_unsuspend_user", { p_admin_id: user!.id, p_user_id: userId });
       if (error) { toast.error(error.message); return; }
       toast.success("Account unsuspended");
     } else {
       const reason = window.prompt("Reason for suspension (optional):") || "";
-      const { error } = await supabase.rpc("admin_suspend_user", { p_admin_id: user!.id, p_user_id: userId, p_reason: reason } as any);
+      const { error } = await supabase.rpc("admin_suspend_user", { p_admin_id: user!.id, p_user_id: userId, p_reason: reason });
       if (error) { toast.error(error.message); return; }
       toast.success("Account suspended");
     }
@@ -315,10 +320,10 @@ export default function AdminPage() {
 
   const deleteUserAccount = async (userId: string) => {
     if (!window.confirm("Permanently delete this account? This cannot be undone.")) return;
-    const { data, error } = await supabase.functions.invoke("admin-delete-user", {
+    const { data, error } = await supabase.functions.invoke<{ error?: string }>("admin-delete-user", {
       body: { target_user_id: userId },
     });
-    if (error || (data as any)?.error) { toast.error((data as any)?.error || error?.message || "Failed"); return; }
+    if (error || data?.error) { toast.error(data?.error || error?.message || "Failed"); return; }
     setUsers(prev => prev.filter(u => u.user_id !== userId));
     setChatActivity(prev => prev.filter(u => u.user_id !== userId));
     toast.success("Account deleted");
@@ -337,7 +342,7 @@ export default function AdminPage() {
       ends_at: contestForm.ends_at || null,
       created_by: user!.id,
       status: "draft",
-    } as any).select().single() as any;
+    }).select().single();
     setSavingContest(false);
     if (error) { toast.error("Failed to create contest"); return; }
     setContests(prev => [data as Contest, ...prev]);
@@ -348,7 +353,7 @@ export default function AdminPage() {
 
   const updateContestStatus = async (contestId: string, status: string) => {
     const contest = contests.find(c => c.id === contestId);
-    const { error } = await supabase.from("contests").update({ status } as any).eq("id", contestId);
+    const { error } = await supabase.from("contests").update({ status }).eq("id", contestId);
     if (error) { toast.error("Failed to update contest"); return; }
     setContests(prev => prev.map(c => c.id === contestId ? { ...c, status } : c));
     if (selectedContest?.id === contestId) setSelectedContest(prev => prev ? { ...prev, status } : null);
@@ -361,7 +366,7 @@ export default function AdminPage() {
         message: `${contest.description || contest.title}\n\nReward: ${contest.reward_amount} coins per winner${contest.ends_at ? `\nEnds: ${new Date(contest.ends_at).toLocaleDateString()}` : ""}\n\nJoin now from the Contests page!`,
         sent_by: user.id,
         priority: "important",
-      } as any);
+      });
     }
   };
 
@@ -377,7 +382,7 @@ export default function AdminPage() {
   const openContestDetail = async (contest: Contest) => {
     setSelectedContest(contest);
     setLoadingParticipants(true);
-    const { data: parts } = await supabase.from("contest_participants").select("*").eq("contest_id", contest.id).order("joined_at", { ascending: false }) as any;
+    const { data: parts } = await supabase.from("contest_participants").select("*").eq("contest_id", contest.id).order("joined_at", { ascending: false });
     const participantList = (parts || []) as ContestParticipant[];
     if (participantList.length > 0) {
       const userIds = participantList.map(p => p.user_id);
@@ -395,7 +400,7 @@ export default function AdminPage() {
       p_admin_id: user!.id,
       p_contest_id: contestId,
       p_user_id: userId,
-    } as any);
+    });
     if (error) { toast.error(error.message); return; }
     setParticipants(prev => prev.map(p => p.user_id === userId ? { ...p, rewarded: true } : p));
     toast.success("User rewarded!");
@@ -411,7 +416,7 @@ export default function AdminPage() {
         p_admin_id: user!.id,
         p_contest_id: contestId,
         p_user_id: p.user_id,
-      } as any);
+      });
       if (!error) success++;
     }
     setParticipants(prev => prev.map(p => ({ ...p, rewarded: true })));
@@ -606,7 +611,7 @@ export default function AdminPage() {
             {!verifLoading && verifications.length === 0 && (
               <p className="text-sm text-muted-foreground text-center py-8">No verification applications</p>
             )}
-            {verifications.map((v: any) => (
+            {verifications.map((v) => (
               <div key={v.id} className="bg-card rounded-xl p-3 shadow-card">
                 <div className="flex items-center gap-3">
                   <UserAvatar

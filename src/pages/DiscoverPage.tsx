@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -13,6 +13,15 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "sonner";
+import type { Tables } from "@/integrations/supabase/types";
+
+interface PageSummary {
+  id: string;
+  name: string;
+  category: string | null;
+  profile_image: string | null;
+  followers_count: number;
+}
 
 interface SuggestedUser {
   user_id: string;
@@ -28,31 +37,16 @@ export default function DiscoverPage() {
   const { unreadCounts } = useUnreadCounts();
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("rooms");
-  const [rooms, setRooms] = useState<any[]>([]);
-  const [users, setUsers] = useState<any[]>([]);
-  const [pages, setPages] = useState<any[]>([]);
-  const [trendingPages, setTrendingPages] = useState<any[]>([]);
+  const [rooms, setRooms] = useState<(Tables<"rooms"> & { member_count: number })[]>([]);
+  const [users, setUsers] = useState<Tables<"profiles">[]>([]);
+  const [pages, setPages] = useState<PageSummary[]>([]);
+  const [trendingPages, setTrendingPages] = useState<PageSummary[]>([]);
   const [suggestions, setSuggestions] = useState<SuggestedUser[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
   const [sendingTo, setSendingTo] = useState<string | null>(null);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    fetchTrending();
-    if (user) fetchSuggestions();
-  }, [user]);
-
-  useEffect(() => {
-    if (query.trim()) {
-      searchAll(query.trim());
-    } else {
-      fetchTrending();
-      setUsers([]);
-      setPages([]);
-    }
-  }, [query]);
-
-  const fetchSuggestions = async () => {
+  const fetchSuggestions = useCallback(async () => {
     setSuggestionsLoading(true);
     const { data, error } = await supabase.rpc("get_people_you_may_know", {
       p_user_id: user!.id,
@@ -60,9 +54,9 @@ export default function DiscoverPage() {
     });
     if (!error && data) setSuggestions(data as SuggestedUser[]);
     setSuggestionsLoading(false);
-  };
+  }, [user]);
 
-  const fetchTrending = async () => {
+  const fetchTrending = useCallback(async () => {
     const { data } = await supabase
       .from("rooms")
       .select("*")
@@ -76,7 +70,7 @@ export default function DiscoverPage() {
       ? await supabase.rpc("get_room_member_counts", { p_room_ids: roomIds })
       : { data: [] };
     const memberCounts: Record<string, number> = {};
-    (counts || []).forEach((c: any) => { memberCounts[c.room_id] = c.member_count; });
+    (counts || []).forEach((c) => { memberCounts[c.room_id] = c.member_count; });
     const enriched = allRooms.map((r) => ({ ...r, member_count: memberCounts[r.id] || 0 }));
     enriched.sort((a, b) => b.member_count - a.member_count);
     setRooms(enriched);
@@ -86,9 +80,9 @@ export default function DiscoverPage() {
       .order("followers_count", { ascending: false })
       .limit(20);
     setTrendingPages(pgs ?? []);
-  };
+  }, []);
 
-  const searchAll = async (q: string) => {
+  const searchAll = useCallback(async (q: string) => {
     const [roomsRes, usersRes, pagesRes] = await Promise.all([
       supabase.from("rooms").select("*").eq("is_active", true).ilike("name", `%${q}%`).limit(20),
       supabase.from("profiles").select("*").or(`username.ilike.%${q}%,display_name.ilike.%${q}%`).limit(20),
@@ -97,7 +91,22 @@ export default function DiscoverPage() {
     setRooms(roomsRes.data?.map((r) => ({ ...r, member_count: 0 })) || []);
     setUsers(usersRes.data || []);
     setPages(pagesRes.data || []);
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchTrending();
+    if (user) fetchSuggestions();
+  }, [user, fetchTrending, fetchSuggestions]);
+
+  useEffect(() => {
+    if (query.trim()) {
+      searchAll(query.trim());
+    } else {
+      fetchTrending();
+      setUsers([]);
+      setPages([]);
+    }
+  }, [query, searchAll, fetchTrending]);
 
   const sendFriendRequest = async (addresseeId: string) => {
     if (!user) return;

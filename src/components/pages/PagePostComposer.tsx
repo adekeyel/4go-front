@@ -66,7 +66,7 @@ export default function PagePostComposer({ pageId, onPosted }: Props) {
         .select("id")
         .single();
       if (error) throw error;
-      const newId = (data as any).id as string;
+      const newId = data.id;
       if (content.trim()) {
         await recordFromText(content.trim(), {
           sourceType: "post",
@@ -77,8 +77,8 @@ export default function PagePostComposer({ pageId, onPosted }: Props) {
       setContent(""); setFile(null); setPreview(null); setType("text");
       toast.success("Post published!");
       onPosted(newId);
-    } catch (e: any) {
-      toast.error(e.message ?? "Failed to publish");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to publish");
     } finally { setBusy(false); }
   };
 

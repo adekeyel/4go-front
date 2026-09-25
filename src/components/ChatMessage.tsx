@@ -87,11 +87,14 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
         p_user_id: user.id,
         p_message_id: message.id,
       });
-      if (data && typeof data === "object" && "view_count" in (data as any)) {
-        setViewCount((data as any).view_count);
+      if (data && typeof data === "object" && "view_count" in data) {
+        setViewCount((data as { view_count: number }).view_count);
       }
     };
     recordView();
+    // Deliberately narrow deps: this should fire once per (message, viewer) pair.
+    // isOwn/isViewEligible are derived from message/user already covered below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.id, user?.id]);
 
   // For own monetized content, fetch view count

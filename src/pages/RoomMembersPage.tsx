@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { blockUser } from "@/lib/safety";
 import { toast } from "sonner";
+import type { Tables } from "@/integrations/supabase/types";
 
 interface Member {
   user_id: string;
@@ -36,7 +37,7 @@ export default function RoomMembersPage() {
   const [sending, setSending] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
-  const [room, setRoom] = useState<any>(null);
+  const [room, setRoom] = useState<Tables<"rooms"> | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [editRules, setEditRules] = useState("");
   const [editFee, setEditFee] = useState(0);
@@ -45,36 +46,30 @@ export default function RoomMembersPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [expandedRequest, setExpandedRequest] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!roomId) return;
-    fetchMembers();
-    fetchRoomData();
-  }, [roomId]);
-
-  const fetchRoomData = async () => {
+  const fetchRoomData = useCallback(async () => {
     if (!roomId || !user) return;
     const { data: r } = await supabase.from("rooms").select("*").eq("id", roomId).single();
     setRoom(r);
-    setEditRules((r as any)?.rules || "");
-    setEditFee((r as any)?.join_fee || 0);
-    setEditQuestions((r as any)?.join_questions || []);
+    setEditRules(r?.rules || "");
+    setEditFee(r?.join_fee || 0);
+    setEditQuestions(r?.join_questions || []);
 
     const { data: membership } = await supabase.from("room_members").select("role").eq("room_id", roomId).eq("user_id", user.id).maybeSingle();
     const admin = membership?.role === "admin";
     setIsAdmin(admin);
 
     if (admin) {
-      const { data: requests } = await supabase.from("room_join_requests").select("*").eq("room_id", roomId).eq("status", "pending").order("created_at", { ascending: true }) as any;
+      const { data: requests } = await supabase.from("room_join_requests").select("*").eq("room_id", roomId).eq("status", "pending").order("created_at", { ascending: true });
       if (requests && requests.length > 0) {
-        const userIds = requests.map((r: any) => r.user_id);
+        const userIds = requests.map((r) => r.user_id);
         const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, username, avatar_url").in("user_id", userIds);
         const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
-        setJoinRequests(requests.map((r: any) => ({ ...r, profile: profileMap.get(r.user_id) })));
+        setJoinRequests(requests.map((r) => ({ ...r, profile: profileMap.get(r.user_id) })));
       }
     }
-  };
+  }, [roomId, user]);
 
-  const fetchMembers = async () => {
+  const fetchMembers = useCallback(async () => {
     const { data: rm } = await supabase.from("room_members").select("user_id").eq("room_id", roomId!);
     if (rm && rm.length > 0) {
       const ids = rm.map((m) => m.user_id).filter((id) => id !== user?.id);
@@ -82,14 +77,20 @@ export default function RoomMembersPage() {
       const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, username, avatar_url, is_online").in("user_id", ids);
       setMembers(profiles || []);
     }
-  };
+  }, [roomId, user?.id]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    fetchMembers();
+    fetchRoomData();
+  }, [roomId, fetchMembers, fetchRoomData]);
 
   const handleApproveRequest = async (request: JoinRequest) => {
     if (!roomId || !user) return;
     const { error } = await supabase.rpc("approve_join_request", {
       p_admin_id: user.id,
       p_request_id: request.id,
-    } as any);
+    });
     if (error) {
       toast.error(error.message || "Couldn't approve request");
       return;
@@ -104,7 +105,7 @@ export default function RoomMembersPage() {
     const { error } = await supabase.rpc("reject_join_request", {
       p_admin_id: user.id,
       p_request_id: request.id,
-    } as any);
+    });
     if (error) {
       toast.error(error.message || "Couldn't decline request");
       return;
@@ -131,7 +132,7 @@ export default function RoomMembersPage() {
       rules: editRules.trim() || null,
       join_fee: editFee,
       join_questions: editQuestions.length > 0 ? editQuestions : null,
-    } as any).eq("id", roomId);
+    }).eq("id", roomId);
     if (error) toast.error("Couldn't save settings");
     else { toast.success("Room settings saved!"); setShowSettings(false); }
     setSavingSettings(false);
@@ -157,7 +158,7 @@ export default function RoomMembersPage() {
     toast.success("User blocked");
   };
 
-  const roomQuestions: string[] = (room as any)?.join_questions || [];
+  const roomQuestions: string[] = room?.join_questions || [];
 
   return (
     <div className="min-h-screen bg-background">

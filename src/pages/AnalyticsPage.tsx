@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -24,12 +24,7 @@ export default function AnalyticsPage() {
   const [dailyStats, setDailyStats] = useState<DailyStat[]>([]);
   const [period, setPeriod] = useState<7 | 14 | 30>(7);
 
-  useEffect(() => {
-    if (!user) return;
-    loadAnalytics();
-  }, [user, period]);
-
-  const loadAnalytics = async () => {
+  const loadAnalytics = useCallback(async () => {
     if (!user) return;
     setLoading(true);
 
@@ -75,7 +70,12 @@ export default function AnalyticsPage() {
       }))
     );
     setLoading(false);
-  };
+  }, [user, period]);
+
+  useEffect(() => {
+    if (!user) return;
+    loadAnalytics();
+  }, [user, period, loadAnalytics]);
 
   const isMonetized = profile?.is_monetized ?? false;
 

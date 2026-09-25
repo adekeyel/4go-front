@@ -27,7 +27,9 @@ export default function PagesListPage() {
   const [pages, setPages] = useState<Page[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tab, user]);
+  // Runs once per tab/user change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [tab, user]);
 
   const load = async () => {
     setLoading(true);
@@ -38,7 +40,7 @@ export default function PagesListPage() {
     } else if (tab === "following") {
       if (!user) { setPages([]); setLoading(false); return; }
       const { data: follows } = await supabase.from("page_followers").select("page_id").eq("user_id", user.id);
-      const ids = (follows ?? []).map((f: any) => f.page_id);
+      const ids = (follows ?? []).map((f) => f.page_id);
       if (ids.length === 0) { setPages([]); setLoading(false); return; }
       const { data } = await supabase.from("pages").select("*").in("id", ids);
       setPages((data ?? []) as Page[]);

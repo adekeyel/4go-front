@@ -63,7 +63,7 @@ export default function NotificationBell() {
           .limit(30),
       ]);
       setNotifications((notifRes.data as GlobalNotification[]) || []);
-      setReadIds(new Set((readsRes.data || []).map((r: any) => r.notification_id)));
+      setReadIds(new Set((readsRes.data || []).map((r) => r.notification_id)));
       setUnreadMentions(mentionsRes.count ?? 0);
       setEmpNotifs((empRes.data as EmployeeNotif[]) || []);
     };

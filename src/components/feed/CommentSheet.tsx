@@ -59,14 +59,14 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
       .eq("post_id", postId)
       .order("created_at", { ascending: true });
     if (!data) return;
-    const userIds = [...new Set(data.map((c: any) => c.user_id))];
+    const userIds = [...new Set(data.map((c) => c.user_id))];
     const { data: profiles } = await supabase
       .from("profiles")
       .select("user_id, display_name, avatar_url, username")
       .in("user_id", userIds);
-    const pmap = Object.fromEntries((profiles || []).map((p: any) => [p.user_id, p])) as Record<string, Profile>;
+    const pmap = Object.fromEntries((profiles || []).map((p) => [p.user_id, p])) as Record<string, Profile>;
     setProfileMap(pmap);
-    const flat: Comment[] = (data as any[]).map((c) => ({ ...c, profile: pmap[c.user_id], children: [] }));
+    const flat: Comment[] = data.map((c) => ({ ...c, profile: pmap[c.user_id], children: [] }));
     // Build tree
     const map = new Map(flat.map((c) => [c.id, c]));
     const roots: Comment[] = [];
@@ -136,12 +136,13 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
         });
         toast.success("Comment updated");
       } else {
-        const rpcName = pageMode ? "add_page_post_comment" : "add_post_comment";
-        const { data: newId, error } = await supabase.rpc(rpcName as any, {
+        const rpcName: "add_page_post_comment" | "add_post_comment" =
+          pageMode ? "add_page_post_comment" : "add_post_comment";
+        const { data: newId, error } = await supabase.rpc(rpcName, {
           p_user_id: user.id,
           p_post_id: postId,
           p_content: text.trim(),
-          p_parent_id: replyTo?.id ?? null,
+          p_parent_id: replyTo?.id ?? undefined,
         });
         if (error) throw error;
         if (typeof newId === "string") {
@@ -158,8 +159,8 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
       setEditing(null);
       await fetchComments();
       setTimeout(() => listRef.current?.scrollTo(0, listRef.current.scrollHeight), 100);
-    } catch (e: any) {
-      toast.error(e?.message || "Failed to send");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to send");
     } finally {
       setSending(false);
     }
@@ -171,15 +172,31 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
     const { error } = await supabase.from("post_comments").delete().eq("id", c.id);
     if (error) { toast.error("Couldn't delete"); return; }
     if (postId) {
-      const table = pageMode ? "page_posts" : "posts";
-      await supabase
-        .from(table as any)
-        .select("comments_count")
-        .eq("id", postId)
-        .maybeSingle()
-        .then(async ({ data }) => {
-          if (data) await supabase.from(table as any).update({ comments_count: Math.max(((data as any).comments_count || 1) - 1, 0) }).eq("id", postId);
-        });
+      if (pageMode) {
+        const { data } = await supabase
+          .from("page_posts")
+          .select("comments_count")
+          .eq("id", postId)
+          .maybeSingle();
+        if (data) {
+          await supabase
+            .from("page_posts")
+            .update({ comments_count: Math.max((data.comments_count || 1) - 1, 0) })
+            .eq("id", postId);
+        }
+      } else {
+        const { data } = await supabase
+          .from("posts")
+          .select("comments_count")
+          .eq("id", postId)
+          .maybeSingle();
+        if (data) {
+          await supabase
+            .from("posts")
+            .update({ comments_count: Math.max((data.comments_count || 1) - 1, 0) })
+            .eq("id", postId);
+        }
+      }
     }
     fetchComments();
   };

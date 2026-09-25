@@ -14,7 +14,7 @@ export default function AddFriendPage() {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [phone, setPhone] = useState("");
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<{ user_id: string; username: string | null; display_name: string | null; avatar_url: string | null }[]>([]);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState<string | null>(null);
 
@@ -32,8 +32,8 @@ export default function AddFriendPage() {
         .limit(10);
       if (error) throw error;
       setResults(data || []);
-    } catch (err: any) {
-      toast.error(err?.message || "Search failed");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Search failed");
     } finally {
       setLoading(false);
     }
@@ -53,8 +53,8 @@ export default function AddFriendPage() {
         .limit(10);
       if (error) throw error;
       setResults(data || []);
-    } catch (err: any) {
-      toast.error(err?.message || "Search failed");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Search failed");
     } finally {
       setLoading(false);
     }

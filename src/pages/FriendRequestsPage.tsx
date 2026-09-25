@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -20,12 +20,7 @@ export default function FriendRequestsPage() {
   const [requests, setRequests] = useState<FriendRequest[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (!user) return;
-    fetchRequests();
-  }, [user]);
-
-  const fetchRequests = async () => {
+  const fetchRequests = useCallback(async () => {
     if (!user) return;
     const { data } = await supabase
       .from("friends")
@@ -48,7 +43,12 @@ export default function FriendRequestsPage() {
       setRequests([]);
     }
     setLoading(false);
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    fetchRequests();
+  }, [user, fetchRequests]);
 
   const respond = async (id: string, status: "accepted" | "declined") => {
     const { error } = await supabase.from("friends").update({ status }).eq("id", id);

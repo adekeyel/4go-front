@@ -1,7 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
 
-const db = supabase as any;
-
 interface BlockUserParams {
   blockerId: string;
   blockedId: string;
@@ -18,7 +16,7 @@ interface ModerationReportParams {
 }
 
 export async function blockUser({ blockerId, blockedId, reason }: BlockUserParams) {
-  const result = await db.from("user_blocks").upsert(
+  const result = await supabase.from("user_blocks").upsert(
     {
       blocker_id: blockerId,
       blocked_id: blockedId,
@@ -40,7 +38,7 @@ export async function blockUser({ blockerId, blockedId, reason }: BlockUserParam
 }
 
 export async function unblockUser(blockerId: string, blockedId: string) {
-  return db
+  return supabase
     .from("user_blocks")
     .delete()
     .eq("blocker_id", blockerId)
@@ -48,7 +46,7 @@ export async function unblockUser(blockerId: string, blockedId: string) {
 }
 
 export async function fetchBlockedUsers(blockerId: string) {
-  return db
+  return supabase
     .from("user_blocks")
     .select("blocked_id, reason, created_at")
     .eq("blocker_id", blockerId)
@@ -63,7 +61,7 @@ export async function submitModerationReport({
   targetRoomId,
   targetMessageId,
 }: ModerationReportParams) {
-  return db.from("moderation_reports").insert({
+  return supabase.from("moderation_reports").insert({
     reporter_id: reporterId,
     target_user_id: targetUserId || null,
     target_room_id: targetRoomId || null,

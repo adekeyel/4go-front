@@ -26,8 +26,8 @@ export default function VerificationPage() {
   const [busy, setBusy] = useState(false);
   const [verifying, setVerifying] = useState(false);
 
-  const rank = ((profile as any)?.rank as string | undefined) ?? "Amateur";
-  const eligible = ELIGIBLE_RANKS.includes(rank as any);
+  const rank = profile?.rank ?? "Amateur";
+  const eligible = (ELIGIBLE_RANKS as readonly string[]).includes(rank);
 
   useEffect(() => {
     const status = searchParams.get("status");

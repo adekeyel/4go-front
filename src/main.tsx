@@ -16,7 +16,9 @@ import "./index.css";
           if (scriptURL && !scriptURL.endsWith("/sw.js?v=3")) {
             await r.unregister();
           }
-        } catch {}
+        } catch {
+          // Ignore unregister failures — worst case the stale SW stays until next load
+        }
       }
       if ("caches" in window) {
         const keys = await caches.keys();

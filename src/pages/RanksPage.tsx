@@ -7,7 +7,7 @@ import BottomNav from "@/components/BottomNav";
 export default function RanksPage() {
   const navigate = useNavigate();
   const { profile } = useAuth();
-  const currentRank = (profile as any)?.rank || "Amateur";
+  const currentRank = profile?.rank || "Amateur";
   const currentIdx = RANK_THRESHOLDS.findIndex((t) => t.rank === currentRank);
 
   return (

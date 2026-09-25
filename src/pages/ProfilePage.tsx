@@ -158,7 +158,7 @@ export default function ProfilePage() {
     setUploadingAvatar(false);
   };
 
-  const coins = ((profile as any)?.coins || 0) as number;
+  const coins = profile?.coins || 0;
 
   return (
     <div className="min-h-screen bg-background pb-20">
@@ -233,24 +233,24 @@ export default function ProfilePage() {
               )}
               <div className="mt-1.5">
                 <RankProgress
-                  rank={(profile as any)?.rank || "Amateur"}
-                  totalMinutes={(profile as any)?.total_online_minutes || 0}
+                  rank={profile?.rank || "Amateur"}
+                  totalMinutes={profile?.total_online_minutes || 0}
                 />
               </div>
             </div>
           </div>
           <p className="mt-3 text-center text-[11px] text-primary-foreground/85">
-            {Math.floor(((profile as any)?.total_online_minutes || 0) / 60)}h{" "}
-            {((profile as any)?.total_online_minutes || 0) % 60}m total online time
+            {Math.floor((profile?.total_online_minutes || 0) / 60)}h{" "}
+            {(profile?.total_online_minutes || 0) % 60}m total online time
           </p>
-          {(((profile as any)?.rank === "Master") || (profile as any)?.is_monetized) && (
+          {((profile?.rank === "Master") || profile?.is_monetized) && (
             <div className="mt-2 flex flex-wrap justify-center gap-1.5">
-              {(profile as any)?.rank === "Master" && (
+              {profile?.rank === "Master" && (
                 <span className="text-[10px] text-primary-foreground bg-primary-foreground/20 rounded-full px-2 py-0.5">
                   🏅 4GO Ambassador
                 </span>
               )}
-              {(profile as any)?.is_monetized && (
+              {profile?.is_monetized && (
                 <span className="text-[10px] text-primary-foreground bg-primary-foreground/20 rounded-full px-2 py-0.5">
                   💰 Monetized
                 </span>

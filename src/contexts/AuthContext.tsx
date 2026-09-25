@@ -126,7 +126,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [fetchProfile]);
 
   // Realtime: keep our own profile (premium/verified flags, coins, rank, etc.) in sync
   useEffect(() => {

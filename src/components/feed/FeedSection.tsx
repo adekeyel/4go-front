@@ -81,9 +81,9 @@ export default function FeedSection({ preview = false }: FeedSectionProps) {
               .from("profiles")
               .select("user_id, display_name, username, avatar_url, rank")
               .in("user_id", ids)
-          : { data: [] as any[] };
-        const profMap = new Map((profs || []).map((p: any) => [p.user_id, p]));
-        const fetched: FeedPost[] = (rows || []).map((p: any) => ({
+          : { data: [] as { user_id: string; display_name: string | null; username: string | null; avatar_url: string | null; rank: string }[] };
+        const profMap = new Map((profs || []).map((p) => [p.user_id, p]));
+        const fetched: FeedPost[] = (rows || []).map((p) => ({
           ...p,
           display_name: profMap.get(p.user_id)?.display_name ?? null,
           username: profMap.get(p.user_id)?.username ?? null,
@@ -99,12 +99,12 @@ export default function FeedSection({ preview = false }: FeedSectionProps) {
           .select("id, page_id, author_id, content, media_url, media_type, views_count, unique_views_count, likes_count, comments_count, saves_count, created_at")
           .order("created_at", { ascending: false })
           .range(offset, offset + pageSize - 1);
-        const pageIds = (pageRows || []).map((r: any) => r.page_id);
+        const pageIds = (pageRows || []).map((r) => r.page_id);
         const { data: pageMeta } = pageIds.length
           ? await supabase.from("pages").select("id, name, profile_image").in("id", pageIds)
-          : { data: [] as any[] };
-        const pageMap = new Map((pageMeta || []).map((p: any) => [p.id, p]));
-        const fetchedPages: PagePostCardData[] = (pageRows || []).map((p: any) => ({
+          : { data: [] as { id: string; name: string; profile_image: string | null }[] };
+        const pageMap = new Map((pageMeta || []).map((p) => [p.id, p]));
+        const fetchedPages: PagePostCardData[] = (pageRows || []).map((p) => ({
           ...p,
           page_name: pageMap.get(p.page_id)?.name ?? null,
           page_avatar: pageMap.get(p.page_id)?.profile_image ?? null,

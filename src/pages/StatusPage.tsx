@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -71,7 +71,7 @@ export default function StatusPage() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [viewer, setViewer] = useState<{ group: Group; index: number } | null>(null);
 
-  const fetchAll = async () => {
+  const fetchAll = useCallback(async () => {
     if (!user) return;
     setLoading(true);
     // Get all viewable statuses (RLS filters to friends + self, non-expired)
@@ -107,11 +107,11 @@ export default function StatusPage() {
     setMyStatuses(mine);
     setGroups(others);
     setLoading(false);
-  };
+  }, [user]);
 
   useEffect(() => {
     void fetchAll();
-  }, [user?.id]);
+  }, [fetchAll]);
 
   // Realtime: reflect new posts and deletes immediately for everyone viewing.
   useEffect(() => {
@@ -467,6 +467,9 @@ function StatusViewer({
   useEffect(() => {
     if (!current || !user || isMine) return;
     void supabase.from("status_views").insert({ status_id: current.id, viewer_id: user.id });
+    // current/user are derived each render; their .id fields (already in deps)
+    // are what should actually trigger a new view record.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id, user?.id, isMine]);
 
   // Load reactions for current status + realtime
@@ -493,6 +496,9 @@ function StatusViewer({
       cancelled = true;
       void supabase.removeChannel(ch);
     };
+    // current is derived each render; current?.id (already in deps) is the
+    // actual trigger for re-subscribing to this status's reactions channel.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id]);
 
   // Auto-advance

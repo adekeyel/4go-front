@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -25,12 +25,7 @@ export default function ReferralPage() {
 
   const referralLink = `${window.location.origin}/signup?ref=${referralCode}`;
 
-  useEffect(() => {
-    if (!user) return;
-    fetchData();
-  }, [user]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     if (!user) return;
 
     // Get referral code
@@ -69,7 +64,12 @@ export default function ReferralPage() {
     }
 
     setLoading(false);
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    fetchData();
+  }, [user, fetchData]);
 
   const copyLink = async () => {
     try {

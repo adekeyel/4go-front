@@ -31,10 +31,10 @@ export default function MessageReactions({ messageId, isOwn }: Props) {
     let mounted = true;
     const load = async () => {
       const { data } = await supabase
-        .from("message_reactions" as any)
+        .from("message_reactions")
         .select("*")
         .eq("message_id", messageId);
-      if (mounted) setReactions((data as any) ?? []);
+      if (mounted) setReactions(data ?? []);
     };
     load();
 
@@ -69,14 +69,14 @@ export default function MessageReactions({ messageId, isOwn }: Props) {
     const mine = grouped[emoji]?.mine;
     if (mine) {
       await supabase
-        .from("message_reactions" as any)
+        .from("message_reactions")
         .delete()
         .eq("message_id", messageId)
         .eq("user_id", user.id)
         .eq("emoji", emoji);
     } else {
       await supabase
-        .from("message_reactions" as any)
+        .from("message_reactions")
         .insert({ message_id: messageId, user_id: user.id, emoji });
     }
   };

@@ -87,6 +87,9 @@ const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextareaProps>(
         setActiveIdx(0);
       }, 120);
       return () => clearTimeout(t);
+      // user?.id (primitive) is used deliberately instead of the user object
+      // to avoid re-running this debounced search on every auth context refresh.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [query, mentionStart, user?.id, roomId]);
 
     const detectMention = (text: string, caret: number) => {

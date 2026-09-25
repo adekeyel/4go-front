@@ -59,8 +59,8 @@ export default function CreatePagePage() {
       if (error) throw error;
       toast.success("Page created!");
       navigate(`/pages/${data}`);
-    } catch (err: any) {
-      toast.error(err.message ?? "Failed to create page");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create page");
     } finally {
       setSubmitting(false);
     }

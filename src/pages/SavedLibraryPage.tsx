@@ -13,7 +13,9 @@ export default function SavedLibraryPage() {
   const [items, setItems] = useState<PagePostCardData[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [user]);
+  // Runs once per user change
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [user]);
 
   const load = async () => {
     if (!user) return;
@@ -23,19 +25,19 @@ export default function SavedLibraryPage() {
       .select("post_id, saved_at")
       .eq("user_id", user.id)
       .order("saved_at", { ascending: false });
-    const ids = (saves ?? []).map((s: any) => s.post_id);
+    const ids = (saves ?? []).map((s) => s.post_id);
     if (ids.length === 0) { setItems([]); setLoading(false); return; }
     const { data: posts } = await supabase.from("page_posts").select("*").in("id", ids);
-    const pageIds = Array.from(new Set(((posts as any[]) ?? []).map((p) => p.page_id)));
+    const pageIds = Array.from(new Set((posts ?? []).map((p) => p.page_id)));
     const { data: pages } = await supabase.from("pages").select("id, name, profile_image").in("id", pageIds);
-    const pageMap = new Map<string, any>();
-    (pages ?? []).forEach((p: any) => pageMap.set(p.id, p));
-    const merged = (posts ?? []).map((p: any) => ({
+    const pageMap = new Map<string, { id: string; name: string; profile_image: string | null }>();
+    (pages ?? []).forEach((p) => pageMap.set(p.id, p));
+    const merged: PagePostCardData[] = (posts ?? []).map((p) => ({
       ...p,
       page_name: pageMap.get(p.page_id)?.name ?? null,
       page_avatar: pageMap.get(p.page_id)?.profile_image ?? null,
       is_saved: true,
-    })) as PagePostCardData[];
+    }));
     // preserve save order
     const order = new Map(ids.map((id, i) => [id, i]));
     merged.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));

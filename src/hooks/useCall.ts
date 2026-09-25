@@ -284,6 +284,13 @@ export function useCall({ roomId, peerId, peerName }: UseCallOptions) {
       supabase.removeChannel(channel);
       cleanup();
     };
+    // Deliberately narrow: this sets up the call signaling channel once per
+    // roomId/user. createPeerConnection depends on the `user` object (not just
+    // user.id) and would change identity on unrelated auth/profile refreshes;
+    // including it here would tear down and recreate the signaling channel
+    // mid-call. cleanup/addPendingCandidates are stable (empty deps) but kept
+    // out too for consistency with the intended "once per call" semantics.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, user]);
 
   return {

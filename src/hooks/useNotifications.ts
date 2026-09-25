@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import type { BannerData } from "@/components/InAppBanner";
+import type { Tables } from "@/integrations/supabase/types";
 
 const SOUND_KEY = "4go-notification-sound";
 
@@ -138,7 +139,7 @@ export function useNotifications() {
     try {
       if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
         navigator.serviceWorker.ready.then((reg) => {
-          const opts: any = {
+          const opts: NotificationOptions & { vibrate?: number[] } = {
             body,
             icon: "/icons/icon-192.png",
             tag: tag || "4go-notification",
@@ -196,7 +197,7 @@ export function useNotifications() {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages" },
         async (payload) => {
-          const msg = payload.new as any;
+          const msg = payload.new as Tables<"messages">;
           if (msg.sender_id === user.id) return;
           if (currentRoomRef.current === msg.room_id) return;
 
@@ -244,7 +245,7 @@ export function useNotifications() {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "friends", filter: `addressee_id=eq.${user.id}` },
         async (payload) => {
-          const req = payload.new as any;
+          const req = payload.new as Tables<"friends">;
           setUnreadFriendRequests((prev) => prev + 1);
 
           const requester = await getCachedProfile(req.requester_id);

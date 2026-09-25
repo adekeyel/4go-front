@@ -13,7 +13,7 @@ import ReportDialog from "@/components/ReportDialog";
 import { useCallContext } from "@/contexts/CallContext";
 import { ArrowLeft, Flag, Phone, Video, ShieldBan, Users, Pin, X } from "lucide-react";
 import { toast } from "sonner";
-import { Tables } from "@/integrations/supabase/types";
+import { Tables, TablesInsert } from "@/integrations/supabase/types";
 import CallLogSystemMessage from "@/components/CallLogSystemMessage";
 import AclibBanner from "@/components/AclibBanner";
 import SponsorFooterBanner from "@/components/monetization/SponsorFooterBanner";
@@ -92,7 +92,7 @@ export default function ChatRoomPage() {
   const navigate = useNavigate();
   const { typingUsers, broadcastTyping } = useTypingIndicator(roomId);
 
-  const userRank = (profile as any)?.rank || "Amateur";
+  const userRank = profile?.rank || "Amateur";
   const canVoiceCall = VOICE_RANKS.includes(userRank);
   const canVideoCall = VIDEO_RANKS.includes(userRank);
   const canUploadVideo = VIDEO_UPLOAD_RANKS.includes(userRank);
@@ -120,7 +120,7 @@ export default function ChatRoomPage() {
         .eq("user_id", user.id)
         .maybeSingle();
 
-      const originalLastRead = (readData as any)?.last_read_at || null;
+      const originalLastRead = readData?.last_read_at || null;
       if (!isActive) return;
 
       savedLastReadRef.current = originalLastRead;
@@ -128,7 +128,7 @@ export default function ChatRoomPage() {
 
       // 2. Now mark as read
       await supabase.from("room_reads").upsert(
-        { room_id: roomId, user_id: user.id, last_read_at: new Date().toISOString() } as any,
+        { room_id: roomId, user_id: user.id, last_read_at: new Date().toISOString() },
         { onConflict: "room_id,user_id" }
       );
 
@@ -145,7 +145,7 @@ export default function ChatRoomPage() {
       // Mark room as read on leave
       if (roomId && user) {
         supabase.from("room_reads").upsert(
-          { room_id: roomId, user_id: user.id, last_read_at: new Date().toISOString() } as any,
+          { room_id: roomId, user_id: user.id, last_read_at: new Date().toISOString() },
           { onConflict: "room_id,user_id" }
         ).then(() => refetchUnreads());
       }
@@ -192,11 +192,19 @@ export default function ChatRoomPage() {
       .subscribe();
 
     return () => { window.clearInterval(refreshInterval); supabase.removeChannel(channel); };
+    // Intentionally runs once per roomId/user: fetchRoom/checkMembership/fetchPinnedMessages/
+    // fetchCallLogs are plain (non-memoized) functions defined below and read current
+    // roomId/user via closure; including them would cause this effect to tear down and
+    // re-subscribe the realtime channel on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, user]);
 
   useEffect(() => {
     if (!roomId || !user || readyReadRoomId !== roomId) return;
     void fetchMessages();
+    // fetchMessages is a plain function defined below; deps already narrow
+    // this to roomId/user/readyReadRoomId changes, which is the intended trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, user, readyReadRoomId]);
 
   // Deeplink: scroll to specific message id from ?messageId= (e.g. mention notifications)
@@ -293,7 +301,7 @@ export default function ChatRoomPage() {
     setIsAdmin(data?.role === "admin");
 
     if (!data) {
-      const { data: req } = await supabase.from("room_join_requests").select("status").eq("room_id", roomId).eq("user_id", user.id).maybeSingle() as any;
+      const { data: req } = await supabase.from("room_join_requests").select("status").eq("room_id", roomId).eq("user_id", user.id).maybeSingle();
       setJoinRequestStatus(req?.status || null);
     }
   };
@@ -302,7 +310,7 @@ export default function ChatRoomPage() {
     if (!roomId) return;
     const { data: pins } = await supabase.from("pinned_messages").select("message_id").eq("room_id", roomId);
     if (!pins || pins.length === 0) { setPinnedMessages([]); return; }
-    const msgIds = pins.map((p: any) => p.message_id);
+    const msgIds = pins.map((p) => p.message_id);
     const { data: msgs } = await supabase.from("messages").select("*").in("id", msgIds);
     if (msgs && msgs.length > 0) {
       const senderIds = [...new Set(msgs.map((m) => m.sender_id))];
@@ -326,8 +334,8 @@ export default function ChatRoomPage() {
     if (!roomId || !user || !room) return;
 
     if (room.type === "private") {
-      const fee = (room as any).join_fee || 0;
-      const questions: string[] = (room as any).join_questions || [];
+      const fee = room.join_fee || 0;
+      const questions: string[] = room.join_questions || [];
 
       // If there are questions and user hasn't filled them yet, show form
       if (questions.length > 0 && !showJoinForm) {
@@ -347,12 +355,12 @@ export default function ChatRoomPage() {
 
       // Deduct fee immediately
       if (fee > 0) {
-        const coins = (profile as any)?.coins || 0;
+        const coins = profile?.coins || 0;
         if (coins < fee) {
           toast.error(`Not enough coins. You need ${fee} coins to request.`);
           return;
         }
-        const { error: deductErr } = await supabase.from("profiles").update({ coins: coins - fee } as any).eq("user_id", user.id);
+        const { error: deductErr } = await supabase.from("profiles").update({ coins: coins - fee }).eq("user_id", user.id);
         if (deductErr) { toast.error("Couldn't deduct fee"); return; }
       }
 
@@ -361,12 +369,12 @@ export default function ChatRoomPage() {
         user_id: user.id,
         fee_paid: fee,
         answers: questions.length > 0 ? joinAnswers : null,
-      } as any);
+      });
       if (error) {
         // Refund on failure
         if (fee > 0) {
-          const coins = (profile as any)?.coins || 0;
-          await supabase.from("profiles").update({ coins: coins + fee } as any).eq("user_id", user.id);
+          const coins = profile?.coins || 0;
+          await supabase.from("profiles").update({ coins: coins + fee }).eq("user_id", user.id);
         }
         if (error.code === "23505") toast.info("Join request already sent");
         else toast.error("Couldn't send join request");
@@ -491,7 +499,7 @@ export default function ChatRoomPage() {
       toast.error("This is a broadcast-only channel");
       return;
     }
-    const insertData: any = {
+    const insertData: TablesInsert<"messages"> = {
       room_id: roomId,
       sender_id: user.id,
       type,
@@ -514,7 +522,7 @@ export default function ChatRoomPage() {
           .from("profiles")
           .select("user_id, username")
           .in("username", handles);
-        const ids = (profiles || []).map((p: any) => p.user_id).filter((id: string) => id && id !== user.id);
+        const ids = (profiles || []).map((p) => p.user_id).filter((id): id is string => Boolean(id) && id !== user.id);
         if (ids.length > 0) {
           await supabase.rpc("record_mentions", {
             p_mentioner_id: user.id,
@@ -532,7 +540,7 @@ export default function ChatRoomPage() {
   const editMessage = async (messageId: string, content: string) => {
     if (!user) return;
     const now = new Date().toISOString();
-    const { error } = await supabase.from("messages").update({ content, edited_at: now } as any).eq("id", messageId).eq("sender_id", user.id);
+    const { error } = await supabase.from("messages").update({ content, edited_at: now }).eq("id", messageId).eq("sender_id", user.id);
     if (error) { toast.error("Couldn't edit message"); return; }
     setMessages((c) => c.map((m) => m.id === messageId ? { ...m, content, edited_at: now } : m));
     toast.success("Message updated");
@@ -554,7 +562,7 @@ export default function ChatRoomPage() {
       setPinnedMessages((c) => c.filter((m) => m.id !== messageId));
       toast.success("Message unpinned");
     } else {
-      const { error } = await supabase.from("pinned_messages").insert({ room_id: roomId, message_id: messageId, pinned_by: user.id } as any);
+      const { error } = await supabase.from("pinned_messages").insert({ room_id: roomId, message_id: messageId, pinned_by: user.id });
       if (error) { toast.error("Couldn't pin message"); return; }
       const msg = messages.find((m) => m.id === messageId);
       if (msg) setPinnedMessages((c) => [...c, msg]);
@@ -824,21 +832,21 @@ export default function ChatRoomPage() {
         />
       ) : (
         <div className="p-4 border-t border-border space-y-3 max-h-[60vh] overflow-y-auto">
-          {room?.type === "private" && (room as any)?.rules && (
+          {room?.type === "private" && room?.rules && (
             <div className="bg-muted rounded-xl p-3">
               <p className="text-xs font-semibold text-foreground mb-1">📋 Room Rules</p>
-              <p className="text-xs text-muted-foreground whitespace-pre-wrap">{(room as any).rules}</p>
+              <p className="text-xs text-muted-foreground whitespace-pre-wrap">{room.rules}</p>
             </div>
           )}
-          {room?.type === "private" && ((room as any)?.join_fee || 0) > 0 && (
-            <p className="text-xs text-center text-muted-foreground">Joining fee: <span className="font-bold text-primary">{(room as any).join_fee} coins</span> (deducted on request)</p>
+          {room?.type === "private" && (room?.join_fee || 0) > 0 && (
+            <p className="text-xs text-center text-muted-foreground">Joining fee: <span className="font-bold text-primary">{room.join_fee} coins</span> (deducted on request)</p>
           )}
 
           {/* Questions form */}
-          {showJoinForm && ((room as any)?.join_questions || []).length > 0 && (
+          {showJoinForm && (room?.join_questions || []).length > 0 && (
             <div className="space-y-3">
               <p className="text-xs font-semibold text-foreground">📝 Answer these questions to join:</p>
-              {((room as any).join_questions as string[]).map((q: string, i: number) => (
+              {(room.join_questions as string[]).map((q: string, i: number) => (
                 <div key={i}>
                   <p className="text-xs font-medium text-foreground mb-1">{q}</p>
                   <Textarea

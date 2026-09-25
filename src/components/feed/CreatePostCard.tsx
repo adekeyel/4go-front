@@ -67,8 +67,8 @@ export default function CreatePostCard({ onPostCreated }: CreatePostCardProps) {
       removeImage();
       onPostCreated();
       toast.success("Post created!");
-    } catch (err: any) {
-      toast.error(err.message || "Failed to create post");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create post");
     } finally {
       setPosting(false);
     }

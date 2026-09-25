@@ -48,13 +48,13 @@ export default function SharedPostMessage({ raw }: Props) {
       const { data: prof } = await supabase
         .from("profiles")
         .select("display_name, username, avatar_url")
-        .eq("user_id", (data as any).user_id)
+        .eq("user_id", data.user_id)
         .maybeSingle();
       setPost({
-        id: (data as any).id,
-        content: (data as any).content,
-        image_url: (data as any).image_url,
-        user_id: (data as any).user_id,
+        id: data.id,
+        content: data.content,
+        image_url: data.image_url,
+        user_id: data.user_id,
         display_name: prof?.display_name || null,
         username: prof?.username || null,
         avatar_url: prof?.avatar_url || null,

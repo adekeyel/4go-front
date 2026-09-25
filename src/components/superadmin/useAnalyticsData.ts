@@ -26,8 +26,8 @@ export function useAnalyticsData(days = 14) {
     if (!adminId) { setLoading(false); return; }
 
     const [dailyRes, typesRes] = await Promise.all([
-      (supabase.rpc as any)("admin_daily_metrics", { p_admin_id: adminId, p_days: days }),
-      (supabase.rpc as any)("admin_message_type_breakdown", { p_admin_id: adminId }),
+      supabase.rpc("admin_daily_metrics", { p_admin_id: adminId, p_days: days }),
+      supabase.rpc("admin_message_type_breakdown", { p_admin_id: adminId }),
     ]);
 
     setDaily(((dailyRes?.data as DailyMetric[]) || []).map((d) => ({

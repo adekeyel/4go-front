@@ -28,8 +28,8 @@ export function useMentionRecorder() {
         .in("username", handles);
 
       const ids = (profiles || [])
-        .map((p: any) => p.user_id)
-        .filter((id: string) => id && id !== user.id);
+        .map((p) => p.user_id)
+        .filter((id): id is string => Boolean(id) && id !== user.id);
       if (ids.length === 0) return;
 
       await supabase.rpc("record_mentions", {
@@ -41,6 +41,8 @@ export function useMentionRecorder() {
         p_preview: text.slice(0, 200),
       });
     },
+    // user?.id (primitive) used deliberately; only user.id is read from the object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [user?.id]
   );
 

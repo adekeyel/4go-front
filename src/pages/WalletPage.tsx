@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { getBankName } from "@/lib/banks";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -63,20 +63,15 @@ export default function WalletPage() {
   const [balances, setBalances] = useState<Record<string, number>>({});
 
   const coins = profile?.coins ?? 0;
-  const purchased = (profile as any)?.purchased_coins ?? 0;
-  const earned = (profile as any)?.earned_coins ?? 0;
-  const rewards = (profile as any)?.reward_coins ?? 0;
-  const isMaster = (profile as any)?.rank === "Master";
+  const purchased = profile?.purchased_coins ?? 0;
+  const earned = profile?.earned_coins ?? 0;
+  const rewards = profile?.reward_coins ?? 0;
+  const isMaster = profile?.rank === "Master";
   // Withdrawable = earned (post views, post gifts, contests) + purchased (Flutterwave).
   // Locked for non-Master users until they reach Master rank.
   const withdrawable = earned + purchased;
 
-  useEffect(() => {
-    if (!user) return;
-    loadData();
-  }, [user]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     if (!user) return;
     setLoading(true);
 
@@ -102,13 +97,18 @@ export default function WalletPage() {
     // Calculate balances per source (only credits)
     const bal: Record<string, number> = { gift: 0, reward: 0, earning: 0, purchase: 0 };
     txData.forEach((tx) => {
-      if (tx.amount > 0 && bal.hasOwnProperty(tx.source)) {
+      if (tx.amount > 0 && Object.prototype.hasOwnProperty.call(bal, tx.source)) {
         bal[tx.source] += tx.amount;
       }
     });
     setBalances(bal);
     setLoading(false);
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    loadData();
+  }, [user, loadData]);
 
   const filteredTransactions = sourceFilter
     ? transactions.filter((tx) => tx.source === sourceFilter)

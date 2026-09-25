@@ -49,7 +49,7 @@ export default function SharePostDialog({ postId, postPreview, open, onOpenChang
         .select("requester_id, addressee_id")
         .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`)
         .eq("status", "accepted");
-      const friendIds = (friendRows || []).map((f: any) =>
+      const friendIds = (friendRows || []).map((f) =>
         f.requester_id === user.id ? f.addressee_id : f.requester_id
       );
       const { data: friendProfiles } = friendIds.length
@@ -57,30 +57,30 @@ export default function SharePostDialog({ postId, postPreview, open, onOpenChang
             .from("profiles")
             .select("user_id, display_name, username, avatar_url")
             .in("user_id", friendIds)
-        : { data: [] as any[] };
+        : { data: [] as { user_id: string; display_name: string | null; username: string | null; avatar_url: string | null }[] };
 
       // Rooms (non-DM)
       const { data: memberRows } = await supabase
         .from("room_members")
         .select("room_id")
         .eq("user_id", user.id);
-      const roomIds = (memberRows || []).map((r: any) => r.room_id);
+      const roomIds = (memberRows || []).map((r) => r.room_id);
       const { data: rooms } = roomIds.length
         ? await supabase
             .from("rooms")
             .select("id, name, avatar_url, type")
             .in("id", roomIds)
             .neq("type", "dm")
-        : { data: [] as any[] };
+        : { data: [] as { id: string; name: string; avatar_url: string | null; type: string }[] };
 
       const list: ShareTarget[] = [
-        ...(friendProfiles || []).map((p: any) => ({
+        ...(friendProfiles || []).map((p) => ({
           type: "dm" as const,
           id: p.user_id,
           name: p.display_name || p.username || "User",
           avatar_url: p.avatar_url,
         })),
-        ...(rooms || []).map((r: any) => ({
+        ...(rooms || []).map((r) => ({
           type: "room" as const,
           id: r.id,
           name: r.name,
@@ -90,12 +90,19 @@ export default function SharePostDialog({ postId, postPreview, open, onOpenChang
       setTargets(list);
       setLoading(false);
     })();
+    // user?.id (primitive) used deliberately to avoid re-fetching share targets
+    // on every auth context refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, user?.id]);
 
   const toggle = (key: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
       return next;
     });
   };
@@ -120,17 +127,18 @@ export default function SharePostDialog({ postId, postPreview, open, onOpenChang
           if (error || !data) continue;
           roomId = data as string;
         }
-        const rpcName = pageMode ? "forward_page_post_to_room" : "forward_post_to_room";
-        await supabase.rpc(rpcName as any, {
+        const rpcName: "forward_page_post_to_room" | "forward_post_to_room" =
+          pageMode ? "forward_page_post_to_room" : "forward_post_to_room";
+        await supabase.rpc(rpcName, {
           p_user_id: user.id,
           p_post_id: postId,
           p_room_id: roomId,
-          p_note: note || null,
+          p_note: note || undefined,
         });
       }
       toast.success(`Shared with ${selected.size} ${selected.size === 1 ? "chat" : "chats"}`);
       onOpenChange(false);
-    } catch (e: any) {
+    } catch {
       toast.error("Failed to share");
     } finally {
       setSending(false);

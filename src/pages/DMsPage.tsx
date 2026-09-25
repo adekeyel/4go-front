@@ -69,6 +69,9 @@ export default function DMsPage() {
     clearLatestMessageSource();
     fetchFriends();
     fetchPendingCount();
+    // Intentionally runs once per user (on mount/login): clears unread badges
+    // and loads the friends list + pending count for this session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   const fetchPendingCount = async () => {

@@ -42,8 +42,8 @@ export default function MentionsPage() {
             .from("profiles")
             .select("user_id, display_name, username, avatar_url")
             .in("user_id", ids)
-        : { data: [] as any[] };
-      const map = new Map((profiles || []).map((p: any) => [p.user_id, p]));
+        : { data: [] as { user_id: string; display_name: string | null; username: string | null; avatar_url: string | null }[] };
+      const map = new Map((profiles || []).map((p) => [p.user_id, p]));
       setItems(rows.map((r) => ({ ...r, mentioner: map.get(r.mentioner_id) })));
       setLoading(false);
 
@@ -56,6 +56,8 @@ export default function MentionsPage() {
           .in("id", unread);
       }
     })();
+    // user?.id (primitive) used deliberately to avoid re-fetching on every auth refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
   const navTarget = (m: MentionRow) => {

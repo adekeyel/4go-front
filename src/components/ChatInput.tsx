@@ -96,7 +96,7 @@ export default function ChatInput({ onSend, roomId, onTyping, replyTarget, onCan
       onSend("", "video", urlData.publicUrl, undefined, replyTarget?.id);
       toast.success("Video sent!");
       onCancelReply?.();
-    } catch (err: any) {
+    } catch {
       toast.error("Video upload failed. Try a smaller file.");
     }
     setUploading(false);

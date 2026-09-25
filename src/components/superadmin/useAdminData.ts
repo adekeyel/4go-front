@@ -111,7 +111,7 @@ export function useAdminData() {
       supabase.from("subscriptions").select("id,user_id,plan,status,amount_ngn,current_period_end,created_at").order("created_at", { ascending: false }).limit(500),
       supabase.from("rooms").select("id,name,type,is_active,max_members,created_at").order("created_at", { ascending: false }).limit(500),
       adminId
-        ? (supabase.rpc as any)("admin_platform_stats", { p_admin_id: adminId })
+        ? supabase.rpc("admin_platform_stats", { p_admin_id: adminId })
         : Promise.resolve({ data: null }),
     ]);
 

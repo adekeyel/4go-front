@@ -94,6 +94,9 @@ export default function ProfileBadges({ userId, preset, size = "sm", className }
       cancelled = true;
       set.delete(cb);
     };
+    // Depend on preset's primitive fields, not the object reference, so a new
+    // preset object with the same values doesn't re-trigger the realtime subscription.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, preset?.is_premium, preset?.is_verified]);
 
   if (!flags || (!flags.is_premium && !flags.is_verified)) return null;

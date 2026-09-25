@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import type { Tables } from "@/integrations/supabase/types";
 
 export interface UnreadCounts {
   [roomId: string]: number;
@@ -50,7 +51,7 @@ export function useUnreadCounts() {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages" },
         (payload) => {
-          const msg = payload.new as any;
+          const msg = payload.new as Tables<"messages">;
           if (msg.sender_id === user.id) return;
           // Optimistic increment + debounced full refresh
           setUnreadCounts((prev) => ({

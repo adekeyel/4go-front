@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -21,26 +21,7 @@ export default function DailyActivityPage() {
   const [boostStage, setBoostStage] = useState<0 | 1 | 2>(0);
   const [boostCoins, setBoostCoins] = useState(0);
 
-  useEffect(() => {
-    if (user) fetchClaims();
-  }, [user]);
-
-  useEffect(() => {
-    if (!nextClaimAt) { setCountdown(""); return; }
-    const tick = () => {
-      const diff = nextClaimAt.getTime() - Date.now();
-      if (diff <= 0) { setCountdown(""); setNextClaimAt(null); return; }
-      const h = Math.floor(diff / 3600000);
-      const m = Math.floor((diff % 3600000) / 60000);
-      const s = Math.floor((diff % 60000) / 1000);
-      setCountdown(`${h}h ${m}m ${s}s`);
-    };
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [nextClaimAt]);
-
-  const fetchClaims = async () => {
+  const fetchClaims = useCallback(async () => {
     const todayStart = new Date();
     todayStart.setUTCHours(0, 0, 0, 0);
 
@@ -60,7 +41,26 @@ export default function DailyActivityPage() {
       if (next > new Date()) setNextClaimAt(next);
     }
     setInitialLoading(false);
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (user) fetchClaims();
+  }, [user, fetchClaims]);
+
+  useEffect(() => {
+    if (!nextClaimAt) { setCountdown(""); return; }
+    const tick = () => {
+      const diff = nextClaimAt.getTime() - Date.now();
+      if (diff <= 0) { setCountdown(""); setNextClaimAt(null); return; }
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      const s = Math.floor((diff % 60000) / 1000);
+      setCountdown(`${h}h ${m}m ${s}s`);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [nextClaimAt]);
 
   const handleClaim = async () => {
     if (!user) return;

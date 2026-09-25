@@ -41,7 +41,7 @@ export default function GiftPostDialog({
   const [treasures, setTreasures] = useState<Treasure[]>([]);
   const [sending, setSending] = useState(false);
 
-  const coins = (profile as any)?.coins || 0;
+  const coins = profile?.coins || 0;
 
   useEffect(() => {
     if (open) {

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ArrowLeft, Lock, Plus, X } from "lucide-react";
 import { toast } from "sonner";
+import type { TablesInsert } from "@/integrations/supabase/types";
 
 const ROOM_CREATE_RANKS = ["Learner", "Professional", "Expert", "Master"];
 const PRIVATE_ROOM_RANKS = ["Expert", "Master"];
@@ -23,7 +24,7 @@ export default function CreateRoomPage() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  const userRank = (profile as any)?.rank || "Amateur";
+  const userRank = profile?.rank || "Amateur";
   const canCreate = ROOM_CREATE_RANKS.includes(userRank);
   const canCreatePrivate = PRIVATE_ROOM_RANKS.includes(userRank);
 
@@ -60,7 +61,7 @@ export default function CreateRoomPage() {
     if (!user || !name.trim()) return;
     setLoading(true);
 
-    const insertData: any = {
+    const insertData: TablesInsert<"rooms"> = {
       name: name.trim(),
       description: description.trim() || null,
       type,

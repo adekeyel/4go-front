@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, BellRing, ShieldBan, UserCircle2, Info, FileText, LifeBuoy, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -37,17 +37,7 @@ export default function SettingsPage() {
     setSoundEnabled(localStorage.getItem(SOUND_KEY) !== "off");
   }, []);
 
-  useEffect(() => {
-    if (!user) return;
-    void loadBlockedUsers();
-  }, [user]);
-
-  const notificationStatus = useMemo(() => {
-    if (permissionGranted) return "Browser alerts enabled";
-    return "Browser alerts disabled";
-  }, [permissionGranted]);
-
-  const loadBlockedUsers = async () => {
+  const loadBlockedUsers = useCallback(async () => {
     if (!user) return;
     setLoadingBlocks(true);
 
@@ -78,7 +68,17 @@ export default function SettingsPage() {
       }))
     );
     setLoadingBlocks(false);
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    void loadBlockedUsers();
+  }, [user, loadBlockedUsers]);
+
+  const notificationStatus = useMemo(() => {
+    if (permissionGranted) return "Browser alerts enabled";
+    return "Browser alerts disabled";
+  }, [permissionGranted]);
 
   const handleSoundToggle = (enabled: boolean) => {
     setSoundEnabled(enabled);

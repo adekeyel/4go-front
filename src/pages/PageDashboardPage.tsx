@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -33,26 +33,26 @@ export default function PageDashboardPage() {
   const [boosts, setBoosts] = useState<BoostRow[]>([]);
   const [boostPostId, setBoostPostId] = useState<string | null>(null);
 
-  useEffect(() => { if (pageId) load(); /* eslint-disable-next-line */ }, [pageId, user]);
-
-  const load = async () => {
+  const load = useCallback(async () => {
     const { data: p } = await supabase.from("pages").select("name, owner_id").eq("id", pageId!).maybeSingle();
-    if (!p || (user && (p as any).owner_id !== user.id)) {
+    if (!p || (user && p.owner_id !== user.id)) {
       toast.error("Only the owner can view this dashboard");
       navigate(`/pages/${pageId}`);
       return;
     }
-    setPageName((p as any).name);
+    setPageName(p.name);
     const { data: po } = await supabase
       .from("page_posts").select("*").eq("page_id", pageId!).order("created_at", { ascending: false });
-    setPosts((po as any[]) ?? []);
-    const ids = ((po as any[]) ?? []).map((x) => x.id);
+    setPosts(po ?? []);
+    const ids = (po ?? []).map((x) => x.id);
     if (ids.length) {
       const { data: b } = await supabase
         .from("post_boosts").select("*").in("post_id", ids).order("created_at", { ascending: false });
-      setBoosts((b as any[]) ?? []);
+      setBoosts(b ?? []);
     } else setBoosts([]);
-  };
+  }, [pageId, user, navigate]);
+
+  useEffect(() => { if (pageId) load(); }, [pageId, load]);
 
   const totals = posts.reduce(
     (a, p) => ({ views: a.views + p.views_count, unique: a.unique + p.unique_views_count, saves: a.saves + p.saves_count }),

@@ -114,22 +114,25 @@ export default function EmployeeDashboardSection({
 
   useEffect(() => { void load(); }, [load]);
 
-  const inWindow = (lastSeen: string | null, online: boolean) =>
-    windowDays === 0 || online || daysAgo(lastSeen) <= windowDays;
+  const inWindow = useCallback(
+    (lastSeen: string | null, online: boolean) =>
+      windowDays === 0 || online || daysAgo(lastSeen) <= windowDays,
+    [windowDays]
+  );
 
   const filteredInvited = useMemo(() => {
     const q = search.toLowerCase().trim();
     return invited.filter((u) =>
       inWindow(u.last_seen, u.is_online) &&
       (!q || [u.display_name, u.username].some((f) => f?.toLowerCase().includes(q))));
-  }, [invited, search, windowDays]);
+  }, [invited, search, inWindow]);
 
   const filteredDownline = useMemo(() => {
     const q = search.toLowerCase().trim();
     return downline.filter((u) =>
       inWindow(u.last_seen, u.is_online) &&
       (!q || [u.display_name, u.username, u.referrer_name, u.referrer_username].some((f) => f?.toLowerCase().includes(q))));
-  }, [downline, search, windowDays]);
+  }, [downline, search, inWindow]);
 
   const exportMetrics = () => {
     const header = ["Metric", "Value"];

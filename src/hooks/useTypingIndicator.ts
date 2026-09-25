@@ -17,6 +17,7 @@ export function useTypingIndicator(roomId: string | undefined) {
     if (!roomId || !user) return;
 
     const channel = supabase.channel(`typing-${roomId}`);
+    const timeoutsMap = typingTimeoutsRef.current;
 
     channel
       .on("broadcast", { event: "typing" }, ({ payload }) => {
@@ -31,24 +32,24 @@ export function useTypingIndicator(roomId: string | undefined) {
         });
 
         // Clear previous timeout for this user
-        const existing = typingTimeoutsRef.current.get(payload.userId);
+        const existing = timeoutsMap.get(payload.userId);
         if (existing) clearTimeout(existing);
 
         // Remove after 3 seconds of no typing
         const timeout = setTimeout(() => {
           setTypingUsers((prev) => prev.filter((t) => t.userId !== payload.userId));
-          typingTimeoutsRef.current.delete(payload.userId);
+          timeoutsMap.delete(payload.userId);
         }, 3000);
 
-        typingTimeoutsRef.current.set(payload.userId, timeout);
+        timeoutsMap.set(payload.userId, timeout);
       })
       .subscribe();
 
     channelRef.current = channel;
 
     return () => {
-      typingTimeoutsRef.current.forEach((t) => clearTimeout(t));
-      typingTimeoutsRef.current.clear();
+      timeoutsMap.forEach((t) => clearTimeout(t));
+      timeoutsMap.clear();
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current);
       }

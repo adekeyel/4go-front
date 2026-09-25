@@ -47,14 +47,14 @@ export default function SharedPagePostMessage({ raw }: Props) {
       const { data: page } = await supabase
         .from("pages")
         .select("name, profile_image")
-        .eq("id", (data as any).page_id)
+        .eq("id", data.page_id)
         .maybeSingle();
       setPost({
-        id: (data as any).id,
-        page_id: (data as any).page_id,
-        content: (data as any).content,
-        media_url: (data as any).media_url,
-        media_type: (data as any).media_type,
+        id: data.id,
+        page_id: data.page_id,
+        content: data.content,
+        media_url: data.media_url,
+        media_type: data.media_type,
         page_name: page?.name ?? null,
         page_avatar: page?.profile_image ?? null,
       });

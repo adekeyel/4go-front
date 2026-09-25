@@ -99,7 +99,7 @@ export default function InviteContactsPage() {
     }
 
     await supabase.from("device_contacts").delete().eq("owner_id", user.id);
-    const { error: insertError } = await supabase.from("device_contacts").insert(dedupedRows as any);
+    const { error: insertError } = await supabase.from("device_contacts").insert(dedupedRows);
     if (insertError) throw insertError;
 
     const { data, error } = await supabase.rpc("find_contact_matches", {
@@ -125,8 +125,8 @@ export default function InviteContactsPage() {
         await syncPickedContacts(selected);
         toast.success(`${selected.length} contact${selected.length > 1 ? "s" : ""} selected`);
       }
-    } catch (err: any) {
-      if (err?.name !== "AbortError") {
+    } catch (err) {
+      if (err instanceof Error ? err.name !== "AbortError" : true) {
         toast.error("Could not access contacts");
       }
     } finally {
@@ -192,7 +192,9 @@ export default function InviteContactsPage() {
     if (navigator.share) {
       try {
         await navigator.share({ title: "Join 4GO", text: inviteText });
-      } catch {}
+      } catch {
+        // user dismissed the native share sheet
+      }
     } else {
       await copyLink();
     }

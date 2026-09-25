@@ -54,9 +54,9 @@ export default function TreasuresPage() {
   const [verifying, setVerifying] = useState(false);
   const [accountVerified, setAccountVerified] = useState(false);
 
-  const coins = (profile as any)?.coins || 0;
-  const isMonetized = (profile as any)?.is_monetized || false;
-  const isMaster = (profile as any)?.rank === "Master";
+  const coins = profile?.coins || 0;
+  const isMonetized = profile?.is_monetized || false;
+  const isMaster = profile?.rank === "Master";
 
   useEffect(() => {
     fetchTreasures();
@@ -124,7 +124,7 @@ export default function TreasuresPage() {
       };
       verifyPayment();
     }
-  }, [user]);
+  }, [user, refreshProfile]);
 
   const handleSendGift = async () => {
     if (!user || !selectedTreasure || !recipientUsername.trim()) return;
@@ -187,7 +187,7 @@ export default function TreasuresPage() {
     if (error) {
       toast.error(error.message || "Failed to level up");
     } else {
-      const result = data as any;
+      const result = data as unknown as { minutes_added: number; new_rank: string };
       const hrs = Math.floor(result.minutes_added / 60);
       const mins = result.minutes_added % 60;
       toast.success(`🎉 +${hrs}h ${mins}m progress! New rank: ${result.new_rank}`);

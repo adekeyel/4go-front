@@ -28,7 +28,7 @@ export default function BoostModal({ open, onOpenChange, postId, onBoosted }: Bo
       .select("purchased_coins")
       .eq("user_id", user.id)
       .single()
-      .then(({ data }) => setPurchased((data as any)?.purchased_coins ?? 0));
+      .then(({ data }) => setPurchased(data?.purchased_coins ?? 0));
   }, [open, user]);
 
   const handleBoost = async (plan: BoostPlan, cost: number) => {
@@ -49,8 +49,8 @@ export default function BoostModal({ open, onOpenChange, postId, onBoosted }: Bo
       await refreshProfile();
       onBoosted?.();
       onOpenChange(false);
-    } catch (err: any) {
-      toast.error(err.message ?? "Failed to boost");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to boost");
     } finally {
       setBusy(null);
     }

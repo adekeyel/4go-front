@@ -1,5 +1,5 @@
 import AdBanner from "@/components/AdBanner";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -58,20 +58,15 @@ export default function ContestsPage() {
   const [loadingLeaderboard, setLoadingLeaderboard] = useState(false);
   const [pendingJoinId, setPendingJoinId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!user) return;
-    loadContests();
-  }, [user]);
-
-  const loadContests = async () => {
+  const loadContests = useCallback(async () => {
     const [{ data: contestData }, { data: myParticipation }] = await Promise.all([
-      supabase.from("contests").select("*").in("status", ["active", "ended"]).order("created_at", { ascending: false }) as any,
-      supabase.from("contest_participants").select("contest_id").eq("user_id", user!.id) as any,
+      supabase.from("contests").select("*").in("status", ["active", "ended"]).order("created_at", { ascending: false }),
+      supabase.from("contest_participants").select("contest_id").eq("user_id", user!.id),
     ]);
 
     const c = (contestData || []) as Contest[];
     setContests(c);
-    setJoinedIds(new Set((myParticipation || []).map((p: any) => p.contest_id)));
+    setJoinedIds(new Set((myParticipation || []).map((p) => p.contest_id)));
 
     if (c.length > 0) {
       const counts = new Map<string, number>();
@@ -79,13 +74,18 @@ export default function ContestsPage() {
         const { count } = await supabase
           .from("contest_participants")
           .select("id", { count: "exact", head: true })
-          .eq("contest_id", contest.id) as any;
+          .eq("contest_id", contest.id);
         counts.set(contest.id, count || 0);
       }
       setParticipantCounts(counts);
     }
     setLoading(false);
-  };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    loadContests();
+  }, [user, loadContests]);
 
   const performJoin = async (contestId: string) => {
     if (!user) return;
@@ -93,7 +93,7 @@ export default function ContestsPage() {
     const { error } = await supabase.from("contest_participants").insert({
       contest_id: contestId,
       user_id: user.id,
-    } as any);
+    });
     setJoining(null);
     if (error) {
       if (error.code === "23505") toast.info("You already joined this contest");
@@ -122,7 +122,7 @@ export default function ContestsPage() {
     setLoadingLeaderboard(true);
     const { data } = await supabase.rpc("get_contest_leaderboard", {
       p_contest_id: contest.id,
-    }) as any;
+    });
     const entries = (data || []) as LeaderboardEntry[];
     setLeaderboard(entries);
     setLoadingLeaderboard(false);
@@ -134,7 +134,7 @@ export default function ContestsPage() {
     const interval = window.setInterval(async () => {
       const { data } = await supabase.rpc("get_contest_leaderboard", {
         p_contest_id: leaderboardContest.id,
-      }) as any;
+      });
       if (data) setLeaderboard(data as LeaderboardEntry[]);
     }, 30000);
     return () => window.clearInterval(interval);
