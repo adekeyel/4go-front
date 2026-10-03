@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import axios from "axios";
+import { apiClient } from "@/lib/apiClient";
 import { useAuth } from "@/contexts/AuthContext";
+import * as friendsApi from "@/api/friends";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import UserAvatar from "@/components/UserAvatar";
@@ -24,16 +26,10 @@ export default function AddFriendPage() {
     setLoading(true);
     setResults([]);
     try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("user_id, username, display_name, avatar_url")
-        .ilike("username", `%${q}%`)
-        .neq("user_id", user.id)
-        .limit(10);
-      if (error) throw error;
-      setResults(data || []);
+      const { data } = await apiClient.get("/profiles", { params: { q } });
+      setResults((data as typeof results).filter((r) => r.user_id !== user.id));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Search failed");
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error : "Search failed");
     } finally {
       setLoading(false);
     }
@@ -45,16 +41,10 @@ export default function AddFriendPage() {
     setLoading(true);
     setResults([]);
     try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("user_id, username, display_name, avatar_url")
-        .eq("phone_number", q)
-        .neq("user_id", user.id)
-        .limit(10);
-      if (error) throw error;
-      setResults(data || []);
+      const { data } = await apiClient.get("/profiles", { params: { phone: q } });
+      setResults((data as typeof results).filter((r) => r.user_id !== user.id));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Search failed");
+      toast.error(axios.isAxiosError(err) ? err.response?.data?.error : "Search failed");
     } finally {
       setLoading(false);
     }
@@ -63,31 +53,16 @@ export default function AddFriendPage() {
   const sendFriendRequest = async (addresseeId: string) => {
     if (!user) return;
     setSending(addresseeId);
-
-    // Check if already friends or pending
-    const { data: existing } = await supabase
-      .from("friends")
-      .select("id, status")
-      .or(
-        `and(requester_id.eq.${user.id},addressee_id.eq.${addresseeId}),and(requester_id.eq.${addresseeId},addressee_id.eq.${user.id})`
-      )
-      .maybeSingle();
-
-    if (existing) {
-      toast.info(existing.status === "accepted" ? "Already friends!" : "Request already sent!");
-      setSending(null);
-      return;
-    }
-
-    const { error } = await supabase.from("friends").insert({
-      requester_id: user.id,
-      addressee_id: addresseeId,
-    });
-
-    if (error) {
-      toast.error("Failed to send request");
-    } else {
+    try {
+      await friendsApi.sendFriendRequest(addresseeId);
       toast.success("Friend request sent! 🤝");
+    } catch (err) {
+      // The backend already de-dupes (409 if a request/friendship already exists).
+      if (axios.isAxiosError(err) && err.response?.status === 409) {
+        toast.info(err.response.data?.error || "Request already sent!");
+      } else {
+        toast.error("Failed to send request");
+      }
     }
     setSending(null);
   };

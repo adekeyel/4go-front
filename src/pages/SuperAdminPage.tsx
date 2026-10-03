@@ -34,6 +34,7 @@ import ActiveUsersSection from "@/components/superadmin/sections/ActiveUsersSect
 import EmployeeActivityLogSection from "@/components/superadmin/sections/EmployeeActivityLogSection";
 import AdvertisersSection from "@/components/superadmin/sections/AdvertisersSection";
 import AdBannersSection from "@/components/superadmin/sections/AdBannersSection";
+import VideoAdsSection from "@/components/superadmin/sections/VideoAdsSection";
 import { PlaceholderSection } from "@/components/superadmin/sections/primitives";
 import { allowedIdsForRole, type AdminRoleKey } from "@/components/superadmin/adminNav";
 import { cn } from "@/lib/utils";
@@ -143,6 +144,7 @@ export default function SuperAdminPage() {
       case "mkt-delivery": return <DeliveryStatusSection id={active} />;
       case "ads-advertisers": return <AdvertisersSection id={active} />;
       case "ads-banners": return <AdBannersSection id={active} />;
+      case "ads-video": return <VideoAdsSection id={active} />;
       case "sup-tickets":
       case "sup-live": return <SupportInboxSection id={active} />;
       case "set-app":

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import * as roomsApi from "@/api/rooms";
+import * as profilesApi from "@/api/profiles";
 import UserAvatar from "@/components/UserAvatar";
 
 interface Suggestion {
@@ -74,17 +75,28 @@ const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextareaProps>(
         return;
       }
       const t = setTimeout(async () => {
-        if (query.length === 0) {
-          // Show top suggestions even with empty query
+        try {
+          // Room members first (matches the old RPC's room-priority behavior),
+          // filtered client-side; falls back to a global search with no room.
+          let candidates: Suggestion[] = [];
+          if (roomId) {
+            const members = await roomsApi.listRoomMembers(roomId);
+            candidates = members
+              .filter((m) => m.user_id !== user.id)
+              .map((m) => ({ user_id: m.user_id, username: m.profile?.username ?? null, display_name: m.profile?.display_name ?? null, avatar_url: m.profile?.avatar_url ?? null }));
+          } else if (query.length > 0) {
+            const profiles = await profilesApi.searchProfiles(query);
+            candidates = profiles.filter((p) => p.user_id !== user.id);
+          }
+          const q = query.toLowerCase();
+          const filtered = q
+            ? candidates.filter((c) => c.username?.toLowerCase().startsWith(q) || c.display_name?.toLowerCase().startsWith(q))
+            : candidates;
+          setSuggestions(filtered.slice(0, 6));
+          setActiveIdx(0);
+        } catch {
+          setSuggestions([]);
         }
-        const { data } = await supabase.rpc("search_mentionable_users", {
-          p_user_id: user.id,
-          p_query: query,
-          p_room_id: roomId ?? null,
-          p_limit: 6,
-        });
-        setSuggestions((data || []) as Suggestion[]);
-        setActiveIdx(0);
       }, 120);
       return () => clearTimeout(t);
       // user?.id (primitive) is used deliberately instead of the user object

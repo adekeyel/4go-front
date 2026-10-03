@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
+import * as profilesApi from "@/api/profiles";
 import { useAuth } from "@/contexts/AuthContext";
 
 export type PremiumState = {
@@ -28,14 +29,16 @@ export function usePremium(userId?: string): PremiumState {
       return;
     }
     setLoading(true);
-    const { data } = await supabase
-      .from("subscriptions")
-      .select("plan, status, current_period_end")
-      .eq("user_id", uid)
-      .eq("status", "active")
-      .order("current_period_end", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    if (userId && userId !== user?.id) {
+      // Someone else's status: only the public is_premium flag is visible.
+      const other = await profilesApi.getProfile(userId).catch(() => null);
+      setIsPremium(!!other?.is_premium);
+      setPlan(null);
+      setEnd(null);
+      setLoading(false);
+      return;
+    }
+    const data = await walletApi.getSubscription().catch(() => null);
     const active =
       !!data && new Date(data.current_period_end as string).getTime() > Date.now();
     setIsPremium(active);

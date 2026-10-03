@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import axios from "axios";
 import { useAuth } from "@/contexts/AuthContext";
+import * as roomsApi from "@/api/rooms";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ArrowLeft, Lock, Plus, X } from "lucide-react";
 import { toast } from "sonner";
-import type { TablesInsert } from "@/integrations/supabase/types";
 
 const ROOM_CREATE_RANKS = ["Learner", "Professional", "Expert", "Master"];
 const PRIVATE_ROOM_RANKS = ["Expert", "Master"];
@@ -61,35 +61,22 @@ export default function CreateRoomPage() {
     if (!user || !name.trim()) return;
     setLoading(true);
 
-    const insertData: TablesInsert<"rooms"> = {
-      name: name.trim(),
-      description: description.trim() || null,
-      type,
-      created_by: user.id,
-    };
-    if (type === "private") {
-      insertData.rules = rules.trim() || null;
-      insertData.join_fee = joinFee || 0;
-      insertData.join_questions = joinQuestions.length > 0 ? joinQuestions : null;
-    }
-
-    const { data: room, error } = await supabase
-      .from("rooms")
-      .insert(insertData)
-      .select()
-      .single();
-
-    if (error) {
-      toast.error("Couldn't create room");
+    try {
+      const room = await roomsApi.createRoom({
+        name: name.trim(),
+        description: description.trim() || undefined,
+        type,
+        ...(type === "private"
+          ? { rules: rules.trim() || undefined, join_fee: joinFee || 0, join_questions: joinQuestions.length > 0 ? joinQuestions : undefined }
+          : {}),
+      });
+      toast.success("Room created! 🎉");
+      navigate(`/room/${room.id}`);
+    } catch (err) {
+      toast.error((axios.isAxiosError(err) && err.response?.data?.error) || "Couldn't create room");
+    } finally {
       setLoading(false);
-      return;
     }
-
-    await supabase.from("room_members").insert({ room_id: room.id, user_id: user.id, role: "admin" });
-
-    toast.success("Room created! 🎉");
-    navigate(`/room/${room.id}`);
-    setLoading(false);
   };
 
   return (

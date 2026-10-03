@@ -2,6 +2,10 @@ import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import * as roomsApi from "@/api/rooms";
+import * as friendsApi from "@/api/friends";
+import * as profilesApi from "@/api/profiles";
+import axios from "axios";
 
 import BottomNav from "@/components/BottomNav";
 import AclibBanner from "@/components/AclibBanner";
@@ -48,32 +52,16 @@ export default function DiscoverPage() {
 
   const fetchSuggestions = useCallback(async () => {
     setSuggestionsLoading(true);
-    const { data, error } = await supabase.rpc("get_people_you_may_know", {
-      p_user_id: user!.id,
-      p_limit: 20,
-    });
-    if (!error && data) setSuggestions(data as SuggestedUser[]);
+    const data = await friendsApi.getSuggestions(20).catch(() => []);
+    setSuggestions(data);
     setSuggestionsLoading(false);
-  }, [user]);
+  }, []);
 
   const fetchTrending = useCallback(async () => {
-    const { data } = await supabase
-      .from("rooms")
-      .select("*")
-      .in("type", ["public", "private"])
-      .eq("is_active", true)
-      .order("created_at", { ascending: false })
-      .limit(20);
-    const allRooms = data || [];
-    const roomIds = allRooms.map((r) => r.id);
-    const { data: counts } = roomIds.length > 0
-      ? await supabase.rpc("get_room_member_counts", { p_room_ids: roomIds })
-      : { data: [] };
-    const memberCounts: Record<string, number> = {};
-    (counts || []).forEach((c) => { memberCounts[c.room_id] = c.member_count; });
-    const enriched = allRooms.map((r) => ({ ...r, member_count: memberCounts[r.id] || 0 }));
-    enriched.sort((a, b) => b.member_count - a.member_count);
-    setRooms(enriched);
+    const enriched = await roomsApi.browseRooms({ types: ["public", "private"] }).catch(() => []);
+    setRooms(enriched.slice(0, 20));
+    // "Pages" (business/creator directory) hasn't been ported to the new
+    // backend yet — left on Supabase for now, a distinct feature from rooms/chat.
     const { data: pgs } = await supabase
       .from("pages")
       .select("id, name, category, profile_image, followers_count")
@@ -84,12 +72,12 @@ export default function DiscoverPage() {
 
   const searchAll = useCallback(async (q: string) => {
     const [roomsRes, usersRes, pagesRes] = await Promise.all([
-      supabase.from("rooms").select("*").eq("is_active", true).ilike("name", `%${q}%`).limit(20),
-      supabase.from("profiles").select("*").or(`username.ilike.%${q}%,display_name.ilike.%${q}%`).limit(20),
+      roomsApi.browseRooms({ types: ["public", "private"], q }).catch(() => []),
+      profilesApi.searchProfiles(q).catch(() => []),
       supabase.from("pages").select("id, name, category, profile_image, followers_count").ilike("name", `%${q}%`).limit(20),
     ]);
-    setRooms(roomsRes.data?.map((r) => ({ ...r, member_count: 0 })) || []);
-    setUsers(usersRes.data || []);
+    setRooms(roomsRes);
+    setUsers(usersRes);
     setPages(pagesRes.data || []);
   }, []);
 
@@ -112,28 +100,16 @@ export default function DiscoverPage() {
     if (!user) return;
     setSendingTo(addresseeId);
     try {
-      const { data: existing } = await supabase
-        .from("friends")
-        .select("id")
-        .or(`and(requester_id.eq.${user.id},addressee_id.eq.${addresseeId}),and(requester_id.eq.${addresseeId},addressee_id.eq.${user.id})`)
-        .limit(1);
-
-      if (existing && existing.length > 0) {
-        toast.info("Friend request already exists");
-        return;
-      }
-
-      const { error } = await supabase.from("friends").insert({
-        requester_id: user.id,
-        addressee_id: addresseeId,
-      });
-
-      if (error) throw error;
+      await friendsApi.sendFriendRequest(addresseeId);
       toast.success("Friend request sent!");
       setSuggestions((prev) => prev.filter((s) => s.user_id !== addresseeId));
       setUsers((prev) => prev.filter((u) => u.user_id !== addresseeId));
-    } catch {
-      toast.error("Failed to send request");
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 409) {
+        toast.info("Friend request already exists");
+      } else {
+        toast.error("Failed to send request");
+      }
     } finally {
       setSendingTo(null);
     }

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
-import type { Tables } from "@/integrations/supabase/types";
+import { useSocket } from "@/sockets/SocketContext";
+import * as roomsApi from "@/api/rooms";
 
 export interface UnreadCounts {
   [roomId: string]: number;
@@ -9,23 +9,20 @@ export interface UnreadCounts {
 
 export function useUnreadCounts() {
   const { user } = useAuth();
+  const socket = useSocket();
   const [unreadCounts, setUnreadCounts] = useState<UnreadCounts>({});
   const [totalUnreadPersistent, setTotalUnreadPersistent] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchUnreadCounts = useCallback(async () => {
     if (!user) return;
-
-    // Single RPC call instead of N+1 queries
-    const { data } = await supabase.rpc("get_unread_counts", { p_user_id: user.id });
-
+    const data = await roomsApi.getUnreadCounts().catch(() => []);
     const counts: UnreadCounts = {};
     let total = 0;
-    (data || []).forEach((r: { room_id: string; unread_count: number }) => {
+    data.forEach((r) => {
       counts[r.room_id] = r.unread_count;
       total += r.unread_count;
     });
-
     setUnreadCounts(counts);
     setTotalUnreadPersistent(total);
   }, [user]);
@@ -42,33 +39,24 @@ export function useUnreadCounts() {
     }, 2000);
   }, [fetchUnreadCounts]);
 
+  // The backend pushes "message:notify" to this user's personal socket room
+  // for every new message in any room they belong to (not just the open one).
   useEffect(() => {
-    if (!user) return;
+    if (!user || !socket) return;
 
-    const channel = supabase
-      .channel(`unread-counter-${user.id}-${Math.random().toString(36).slice(2)}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages" },
-        (payload) => {
-          const msg = payload.new as Tables<"messages">;
-          if (msg.sender_id === user.id) return;
-          // Optimistic increment + debounced full refresh
-          setUnreadCounts((prev) => ({
-            ...prev,
-            [msg.room_id]: (prev[msg.room_id] || 0) + 1,
-          }));
-          setTotalUnreadPersistent((prev) => prev + 1);
-          debouncedRefetch();
-        }
-      )
-      .subscribe();
+    const onNotify = (msg: { roomId: string; senderId: string }) => {
+      if (msg.senderId === user.id) return;
+      setUnreadCounts((prev) => ({ ...prev, [msg.roomId]: (prev[msg.roomId] || 0) + 1 }));
+      setTotalUnreadPersistent((prev) => prev + 1);
+      debouncedRefetch();
+    };
 
+    socket.on("message:notify", onNotify);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
-      supabase.removeChannel(channel);
+      socket.off("message:notify", onNotify);
     };
-  }, [user, debouncedRefetch]);
+  }, [user, socket, debouncedRefetch]);
 
   return { unreadCounts, totalUnreadPersistent, refetchUnreads: fetchUnreadCounts };
 }

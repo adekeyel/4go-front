@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import axios from "axios";
 import { useAuth } from "@/contexts/AuthContext";
+import * as roomsApi from "@/api/rooms";
+import * as friendsApi from "@/api/friends";
 import UserAvatar from "@/components/UserAvatar";
 import { ArrowLeft, ShieldBan, UserPlus, Check, X, Settings, Share2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -48,35 +50,36 @@ export default function RoomMembersPage() {
 
   const fetchRoomData = useCallback(async () => {
     if (!roomId || !user) return;
-    const { data: r } = await supabase.from("rooms").select("*").eq("id", roomId).single();
+    const r = await roomsApi.getRoom(roomId).catch(() => null);
     setRoom(r);
     setEditRules(r?.rules || "");
     setEditFee(r?.join_fee || 0);
     setEditQuestions(r?.join_questions || []);
 
-    const { data: membership } = await supabase.from("room_members").select("role").eq("room_id", roomId).eq("user_id", user.id).maybeSingle();
-    const admin = membership?.role === "admin";
+    const status = await roomsApi.getRoomMeStatus(roomId).catch(() => null);
+    const admin = status?.role === "admin";
     setIsAdmin(admin);
 
     if (admin) {
-      const { data: requests } = await supabase.from("room_join_requests").select("*").eq("room_id", roomId).eq("status", "pending").order("created_at", { ascending: true });
-      if (requests && requests.length > 0) {
-        const userIds = requests.map((r) => r.user_id);
-        const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, username, avatar_url").in("user_id", userIds);
-        const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
-        setJoinRequests(requests.map((r) => ({ ...r, profile: profileMap.get(r.user_id) })));
-      }
+      const requests = await roomsApi.listJoinRequests(roomId).catch(() => []);
+      setJoinRequests(requests);
     }
   }, [roomId, user]);
 
   const fetchMembers = useCallback(async () => {
-    const { data: rm } = await supabase.from("room_members").select("user_id").eq("room_id", roomId!);
-    if (rm && rm.length > 0) {
-      const ids = rm.map((m) => m.user_id).filter((id) => id !== user?.id);
-      if (ids.length === 0) { setMembers([]); return; }
-      const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, username, avatar_url, is_online").in("user_id", ids);
-      setMembers(profiles || []);
-    }
+    if (!roomId) return;
+    const rm = await roomsApi.listRoomMembers(roomId).catch(() => []);
+    setMembers(
+      rm
+        .filter((m) => m.user_id !== user?.id)
+        .map((m) => ({
+          user_id: m.user_id,
+          display_name: m.profile?.display_name ?? null,
+          username: m.profile?.username ?? null,
+          avatar_url: m.profile?.avatar_url ?? null,
+          is_online: m.profile?.is_online ?? null,
+        }))
+    );
   }, [roomId, user?.id]);
 
   useEffect(() => {
@@ -87,31 +90,25 @@ export default function RoomMembersPage() {
 
   const handleApproveRequest = async (request: JoinRequest) => {
     if (!roomId || !user) return;
-    const { error } = await supabase.rpc("approve_join_request", {
-      p_admin_id: user.id,
-      p_request_id: request.id,
-    });
-    if (error) {
-      toast.error(error.message || "Couldn't approve request");
-      return;
+    try {
+      await roomsApi.reviewJoinRequest(roomId, request.id, "approve");
+      setJoinRequests((prev) => prev.filter((r) => r.id !== request.id));
+      toast.success(`${request.profile?.display_name || "User"} approved!`);
+      fetchMembers();
+    } catch (err) {
+      toast.error((axios.isAxiosError(err) && err.response?.data?.error) || "Couldn't approve request");
     }
-    setJoinRequests((prev) => prev.filter((r) => r.id !== request.id));
-    toast.success(`${request.profile?.display_name || "User"} approved!`);
-    fetchMembers();
   };
 
   const handleRejectRequest = async (request: JoinRequest) => {
-    if (!user) return;
-    const { error } = await supabase.rpc("reject_join_request", {
-      p_admin_id: user.id,
-      p_request_id: request.id,
-    });
-    if (error) {
-      toast.error(error.message || "Couldn't decline request");
-      return;
+    if (!roomId || !user) return;
+    try {
+      await roomsApi.reviewJoinRequest(roomId, request.id, "reject");
+      setJoinRequests((prev) => prev.filter((r) => r.id !== request.id));
+      toast.success("Request declined. Fee refunded.");
+    } catch (err) {
+      toast.error((axios.isAxiosError(err) && err.response?.data?.error) || "Couldn't decline request");
     }
-    setJoinRequests((prev) => prev.filter((r) => r.id !== request.id));
-    toast.success("Request declined. Fee refunded.");
   };
 
   const addQuestion = () => {
@@ -128,23 +125,33 @@ export default function RoomMembersPage() {
   const saveRoomSettings = async () => {
     if (!roomId) return;
     setSavingSettings(true);
-    const { error } = await supabase.from("rooms").update({
-      rules: editRules.trim() || null,
-      join_fee: editFee,
-      join_questions: editQuestions.length > 0 ? editQuestions : null,
-    }).eq("id", roomId);
-    if (error) toast.error("Couldn't save settings");
-    else { toast.success("Room settings saved!"); setShowSettings(false); }
+    try {
+      await roomsApi.updateRoom(roomId, {
+        rules: editRules.trim() || undefined,
+        join_fee: editFee,
+        join_questions: editQuestions.length > 0 ? editQuestions : undefined,
+      });
+      toast.success("Room settings saved!");
+      setShowSettings(false);
+    } catch {
+      toast.error("Couldn't save settings");
+    }
     setSavingSettings(false);
   };
 
   const addFriend = async (addresseeId: string) => {
     if (!user) return;
     setSending(addresseeId);
-    const { data: existing } = await supabase.from("friends").select("id, status").or(`and(requester_id.eq.${user.id},addressee_id.eq.${addresseeId}),and(requester_id.eq.${addresseeId},addressee_id.eq.${user.id})`).maybeSingle();
-    if (existing) { toast.info(existing.status === "accepted" ? "Already friends!" : "Request already sent!"); setSending(null); return; }
-    const { error } = await supabase.from("friends").insert({ requester_id: user.id, addressee_id: addresseeId });
-    if (error) toast.error("Failed to send request"); else toast.success("Friend request sent! 🤝");
+    try {
+      await friendsApi.sendFriendRequest(addresseeId);
+      toast.success("Friend request sent! 🤝");
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 409) {
+        toast.info(err.response.data?.error || "Request already sent!");
+      } else {
+        toast.error("Failed to send request");
+      }
+    }
     setSending(null);
   };
 

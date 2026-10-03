@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
+import * as profilesApi from "@/api/profiles";
 import { useAuth } from "@/contexts/AuthContext";
 
 export type VerificationApp = {
@@ -31,13 +32,14 @@ export function useVerification(userId?: string): VerificationState {
       return;
     }
     setLoading(true);
-    const { data } = await supabase
-      .from("verification_applications")
-      .select("id, status, is_verified, applied_at, reviewed_at, review_notes")
-      .eq("user_id", uid)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    if (userId && userId !== user?.id) {
+      // Someone else's badge: only the public is_verified flag is visible.
+      const other = await profilesApi.getProfile(userId).catch(() => null);
+      setLatest(other?.is_verified ? ({ id: "", status: "approved", is_verified: true } as unknown as VerificationApp) : null);
+      setLoading(false);
+      return;
+    }
+    const data = await walletApi.getLatestVerification().catch(() => null);
     setLatest((data as VerificationApp | null) ?? null);
     setLoading(false);
   };

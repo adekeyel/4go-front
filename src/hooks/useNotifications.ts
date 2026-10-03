@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { useSocket } from "@/sockets/SocketContext";
+import * as roomsApi from "@/api/rooms";
+import * as friendsApi from "@/api/friends";
+import * as profilesApi from "@/api/profiles";
 import type { BannerData } from "@/components/InAppBanner";
-import type { Tables } from "@/integrations/supabase/types";
 
 const SOUND_KEY = "4go-notification-sound";
 
@@ -62,13 +64,9 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 async function getCachedProfile(userId: string) {
   const cached = profileCache.get(userId);
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached;
-  const { data } = await supabase
-    .from("profiles")
-    .select("display_name, avatar_url")
-    .eq("user_id", userId)
-    .maybeSingle();
+  const [data] = await profilesApi.getProfilesByIds([userId]).catch(() => []);
   if (data) {
-    const entry = { ...data, ts: Date.now() };
+    const entry = { display_name: data.display_name, avatar_url: data.avatar_url, ts: Date.now() };
     profileCache.set(userId, entry);
     return entry;
   }
@@ -78,38 +76,18 @@ async function getCachedProfile(userId: string) {
 async function getCachedRoom(roomId: string) {
   const cached = roomCache.get(roomId);
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached;
-  const { data } = await supabase
-    .from("rooms")
-    .select("name, type")
-    .eq("id", roomId)
-    .maybeSingle();
+  const data = await roomsApi.getRoom(roomId).catch(() => null);
   if (data) {
-    const entry = { ...data, ts: Date.now() };
+    const entry = { name: data.name, type: data.type, ts: Date.now() };
     roomCache.set(roomId, entry);
     return entry;
   }
   return null;
 }
 
-// Cache user's room memberships to avoid per-message membership checks
-let membershipCache: { userId: string; roomIds: Set<string>; ts: number } | null = null;
-const MEMBERSHIP_TTL = 60 * 1000; // 1 minute
-
-async function isUserMember(userId: string, roomId: string): Promise<boolean> {
-  if (membershipCache && membershipCache.userId === userId && Date.now() - membershipCache.ts < MEMBERSHIP_TTL) {
-    return membershipCache.roomIds.has(roomId);
-  }
-  const { data } = await supabase
-    .from("room_members")
-    .select("room_id")
-    .eq("user_id", userId);
-  const roomIds = new Set((data || []).map((m) => m.room_id));
-  membershipCache = { userId, roomIds, ts: Date.now() };
-  return roomIds.has(roomId);
-}
-
 export function useNotifications() {
   const { user } = useAuth();
+  const socket = useSocket();
   const [unreadMessages, setUnreadMessages] = useState(0);
   const [unreadFriendRequests, setUnreadFriendRequests] = useState(0);
   const [permissionGranted, setPermissionGranted] = useState(false);
@@ -181,96 +159,75 @@ export function useNotifications() {
     requestPermission();
 
     // Fetch pending friend requests count once
-    supabase
-      .from("friends")
-      .select("*", { count: "exact", head: true })
-      .eq("addressee_id", user.id)
-      .eq("status", "pending")
-      .then(({ count }) => setUnreadFriendRequests(count || 0));
+    friendsApi
+      .listFriendRequests()
+      .then((reqs) => setUnreadFriendRequests(reqs.length))
+      .catch(() => {});
+  }, [user, requestPermission]);
 
-    // Pre-warm membership cache
-    isUserMember(user.id, "").catch(() => {});
+  useEffect(() => {
+    if (!user || !socket) return;
 
-    const messagesChannel = supabase
-      .channel("notifications-messages")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages" },
-        async (payload) => {
-          const msg = payload.new as Tables<"messages">;
-          if (msg.sender_id === user.id) return;
-          if (currentRoomRef.current === msg.room_id) return;
+    // The backend only sends "message:notify" to members of the room, so no
+    // client-side membership check is needed.
+    const onMessage = async (msg: { roomId: string; messageId: string; senderId: string; type: string; content: string | null }) => {
+      if (msg.senderId === user.id) return;
+      if (currentRoomRef.current === msg.roomId) return;
 
-          // Use cached membership check instead of per-message query
-          const isMember = await isUserMember(user.id, msg.room_id);
-          if (!isMember) return;
+      setUnreadMessages((prev) => prev + 1);
 
-          setUnreadMessages((prev) => prev + 1);
+      const [sender, roomData] = await Promise.all([getCachedProfile(msg.senderId), getCachedRoom(msg.roomId)]);
 
-          // Fetch sender + room in parallel, using cache
-          const [sender, roomData] = await Promise.all([
-            getCachedProfile(msg.sender_id),
-            getCachedRoom(msg.room_id),
-          ]);
+      const senderName = sender?.display_name || "Someone";
+      const body = msg.type === "image" ? "📷 Sent a photo" : msg.type === "audio" ? "🎤 Sent a voice note" : msg.content || "New message";
 
-          const senderName = sender?.display_name || "Someone";
-          const body = msg.type === "image" ? "📷 Sent a photo" : msg.type === "audio" ? "🎤 Sent a voice note" : msg.content || "New message";
+      setLatestMessageSource({ senderId: msg.senderId, senderName, roomId: msg.roomId, preview: body });
 
-          setLatestMessageSource({ senderId: msg.sender_id, senderName, roomId: msg.room_id, preview: body });
+      if (roomData?.type === "dm") {
+        setDmUnreads((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
+      }
 
-          if (roomData?.type === "dm") {
-            setDmUnreads((prev) => ({ ...prev, [msg.sender_id]: (prev[msg.sender_id] || 0) + 1 }));
-          }
+      playNotificationSound();
 
-          playNotificationSound();
+      const title = `${senderName}${roomData?.type === "dm" ? "" : ` in ${roomData?.name || "room"}`}`;
+      setPendingBanner({
+        id: msg.messageId,
+        title,
+        body,
+        avatarUrl: sender?.avatar_url,
+        avatarName: senderName,
+        navigateTo: `/room/${msg.roomId}`,
+      });
 
-          const title = `${senderName}${roomData?.type === "dm" ? "" : ` in ${roomData?.name || "room"}`}`;
-          setPendingBanner({
-            id: msg.id,
-            title,
-            body,
-            avatarUrl: sender?.avatar_url,
-            avatarName: senderName,
-            navigateTo: `/room/${msg.room_id}`,
-          });
-
-          showNotification(title, body, `msg-${msg.id}`);
-        }
-      )
-      .subscribe();
-
-    const friendsChannel = supabase
-      .channel("notifications-friends")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "friends", filter: `addressee_id=eq.${user.id}` },
-        async (payload) => {
-          const req = payload.new as Tables<"friends">;
-          setUnreadFriendRequests((prev) => prev + 1);
-
-          const requester = await getCachedProfile(req.requester_id);
-          const name = requester?.display_name || "Someone";
-          playNotificationSound();
-
-          setPendingBanner({
-            id: req.id,
-            title: "Friend Request",
-            body: `${name} wants to be your friend!`,
-            avatarUrl: requester?.avatar_url,
-            avatarName: name,
-            navigateTo: "/friend-requests",
-          });
-
-          showNotification("Friend Request", `${name} wants to be your friend!`, `friend-${req.id}`);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(messagesChannel);
-      supabase.removeChannel(friendsChannel);
+      showNotification(title, body, `msg-${msg.messageId}`);
     };
-  }, [user, requestPermission, showNotification, playNotificationSound]);
+
+    const onFriendRequest = async (req: { requestId: string; from: string }) => {
+      setUnreadFriendRequests((prev) => prev + 1);
+
+      const requester = await getCachedProfile(req.from);
+      const name = requester?.display_name || "Someone";
+      playNotificationSound();
+
+      setPendingBanner({
+        id: req.requestId,
+        title: "Friend Request",
+        body: `${name} wants to be your friend!`,
+        avatarUrl: requester?.avatar_url,
+        avatarName: name,
+        navigateTo: "/friend-requests",
+      });
+
+      showNotification("Friend Request", `${name} wants to be your friend!`, `friend-${req.requestId}`);
+    };
+
+    socket.on("message:notify", onMessage);
+    socket.on("friend:request", onFriendRequest);
+    return () => {
+      socket.off("message:notify", onMessage);
+      socket.off("friend:request", onFriendRequest);
+    };
+  }, [user, socket, showNotification, playNotificationSound]);
 
   const clearUnreadMessages = useCallback(() => setUnreadMessages(0), []);
   const clearUnreadFriendRequests = useCallback(() => setUnreadFriendRequests(0), []);

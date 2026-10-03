@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Check, Crown, Loader2, Sparkles, Zap, Shield, BarChart3 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
 import { Button } from "@/components/ui/button";
 import BottomNav from "@/components/BottomNav";
 import PremiumBadge from "@/components/PremiumBadge";
@@ -53,16 +53,17 @@ export default function PremiumPage() {
       return;
     }
     setVerifying(true);
-    void supabase.functions
-      .invoke("verify-payment", { body: { transactionId, userId: user.id } })
-      .then(({ data, error }) => {
-        if (error || !data?.success) {
+    void walletApi
+      .verifyPayment(transactionId)
+      .then((data) => {
+        if (!data?.success) {
           toast.error("Couldn't verify payment");
         } else {
           toast.success("Premium activated 🎉");
           void refresh();
         }
       })
+      .catch(() => toast.error("Couldn't verify payment"))
       .finally(() => {
         setVerifying(false);
         // Strip query params
@@ -83,18 +84,19 @@ export default function PremiumPage() {
     }
     const amount = planKey === "yearly" ? 24000 : 2500;
     setBusyPlan(planKey);
-    const { data, error } = await supabase.functions.invoke("create-payment", {
-      body: {
+    let data: { link: string } | null = null;
+    try {
+      data = await walletApi.initiatePayment({
         amount,
-        email,
-        userId: user.id,
         purpose: "premium",
         plan: planKey,
         redirectUrl: window.location.origin + "/premium",
-      },
-    });
+      });
+    } catch {
+      data = null;
+    }
     setBusyPlan(null);
-    if (error || !data?.link) {
+    if (!data?.link) {
       toast.error("Couldn't start checkout");
       return;
     }

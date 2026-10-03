@@ -1,5 +1,5 @@
 import { useState, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as uploadsApi from "@/api/uploads";
 import { Send, Image, Mic, X, Square, CornerUpLeft, Video } from "lucide-react";
 import { toast } from "sonner";
 import MentionTextarea, { MentionTextareaHandle } from "@/components/MentionTextarea";
@@ -51,14 +51,14 @@ export default function ChatInput({ onSend, roomId, onTyping, replyTarget, onCan
     if (!file) return;
     if (file.size > 5 * 1024 * 1024) { toast.error("Image must be under 5MB"); return; }
     setUploading(true);
-    const ext = file.name.split(".").pop();
-    const path = `${roomId}/${Date.now()}.${ext}`;
-    const { data, error } = await supabase.storage.from("chat-media").upload(path, file);
-    if (error) { toast.error("Upload failed"); setUploading(false); return; }
-    const { data: urlData } = supabase.storage.from("chat-media").getPublicUrl(data.path);
-    onSend("", "image", urlData.publicUrl, undefined, replyTarget?.id);
+    try {
+      const { url } = await uploadsApi.uploadFile(file, `chat-media/${roomId}`, file.name);
+      onSend("", "image", url, undefined, replyTarget?.id);
+      onCancelReply?.();
+    } catch {
+      toast.error("Upload failed");
+    }
     setUploading(false);
-    onCancelReply?.();
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -66,7 +66,7 @@ export default function ChatInput({ onSend, roomId, onTyping, replyTarget, onCan
     const file = e.target.files?.[0];
     if (!file) return;
     if (!file.type.startsWith("video/")) { toast.error("Please select a video file"); return; }
-    if (file.size > 1024 * 1024 * 1024) { toast.error("Video must be under 1 GB"); return; }
+    if (file.size > 200 * 1024 * 1024) { toast.error("Video must be under 200MB"); return; }
     // Check duration ≤ 1 hour
     try {
       const duration = await new Promise<number>((resolve, reject) => {
@@ -84,16 +84,8 @@ export default function ChatInput({ onSend, roomId, onTyping, replyTarget, onCan
     setUploading(true);
     toast.info("Uploading video...");
     try {
-      const ext = file.name.split(".").pop() || "mp4";
-      const path = `${roomId}/${Date.now()}.${ext}`;
-      const { data, error } = await supabase.storage.from("chat-media").upload(path, file, {
-        cacheControl: "3600",
-        upsert: false,
-      });
-      if (error) { toast.error("Upload failed: " + error.message); setUploading(false); return; }
-      const { data: urlData } = supabase.storage.from("chat-media").getPublicUrl(data.path);
-      console.log("Video uploaded, public URL:", urlData.publicUrl);
-      onSend("", "video", urlData.publicUrl, undefined, replyTarget?.id);
+      const { url } = await uploadsApi.uploadFile(file, `chat-media/${roomId}`, file.name);
+      onSend("", "video", url, undefined, replyTarget?.id);
       toast.success("Video sent!");
       onCancelReply?.();
     } catch {
@@ -114,14 +106,15 @@ export default function ChatInput({ onSend, roomId, onTyping, replyTarget, onCan
         stream.getTracks().forEach((t) => t.stop());
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
         setUploading(true);
-        const path = `${roomId}/${Date.now()}.webm`;
-        const { data, error } = await supabase.storage.from("chat-media").upload(path, blob);
-        if (error) { toast.error("Upload failed"); setUploading(false); return; }
-        const { data: urlData } = supabase.storage.from("chat-media").getPublicUrl(data.path);
-        const duration = Math.round(blob.size / 16000);
-        onSend("", "audio", urlData.publicUrl, duration, replyTarget?.id);
+        try {
+          const { url } = await uploadsApi.uploadFile(blob, `chat-media/${roomId}`, `${Date.now()}.webm`);
+          const duration = Math.round(blob.size / 16000);
+          onSend("", "audio", url, duration, replyTarget?.id);
+          onCancelReply?.();
+        } catch {
+          toast.error("Upload failed");
+        }
         setUploading(false);
-        onCancelReply?.();
       };
       mediaRecorder.start();
       setRecording(true);

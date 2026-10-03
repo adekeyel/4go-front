@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/contexts/AuthContext";
 import { useNotificationContext } from "@/contexts/NotificationContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as profilesApi from "@/api/profiles";
 import UserAvatar from "@/components/UserAvatar";
 import { fetchBlockedUsers, unblockUser } from "@/lib/safety";
 import { toast } from "sonner";
@@ -55,10 +55,7 @@ export default function SettingsPage() {
       return;
     }
 
-    const { data: profiles } = await supabase
-      .from("profiles")
-      .select("user_id, display_name, username, avatar_url")
-      .in("user_id", blockedIds);
+    const profiles = await profilesApi.getProfilesByIds(blockedIds).catch(() => []);
 
     const profileMap = new Map(profiles?.map((profile) => [profile.user_id, profile]));
     setBlockedUsers(

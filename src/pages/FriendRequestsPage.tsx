@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as friendsApi from "@/api/friends";
 import { useAuth } from "@/contexts/AuthContext";
 import UserAvatar from "@/components/UserAvatar";
 import { ArrowLeft, Check, X } from "lucide-react";
@@ -22,26 +22,8 @@ export default function FriendRequestsPage() {
 
   const fetchRequests = useCallback(async () => {
     if (!user) return;
-    const { data } = await supabase
-      .from("friends")
-      .select("*")
-      .eq("addressee_id", user.id)
-      .eq("status", "pending");
-
-    if (data && data.length > 0) {
-      const ids = data.map((r) => r.requester_id);
-      const { data: profiles } = await supabase
-        .from("profiles")
-        .select("user_id, display_name, username, avatar_url")
-        .in("user_id", ids);
-
-      const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
-      setRequests(
-        data.map((r) => ({ ...r, profile: profileMap.get(r.requester_id) || undefined }))
-      );
-    } else {
-      setRequests([]);
-    }
+    const data = await friendsApi.listFriendRequests().catch(() => []);
+    setRequests(data);
     setLoading(false);
   }, [user]);
 
@@ -51,12 +33,12 @@ export default function FriendRequestsPage() {
   }, [user, fetchRequests]);
 
   const respond = async (id: string, status: "accepted" | "declined") => {
-    const { error } = await supabase.from("friends").update({ status }).eq("id", id);
-    if (error) {
-      toast.error("Failed to respond");
-    } else {
+    try {
+      await friendsApi.respondToFriendRequest(id, status);
       toast.success(status === "accepted" ? "Friend added! 🎉" : "Request declined");
       setRequests((prev) => prev.filter((r) => r.id !== id));
+    } catch {
+      toast.error("Failed to respond");
     }
   };
 

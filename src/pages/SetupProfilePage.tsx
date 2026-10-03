@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/lib/apiClient";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
+import axios from "axios";
 
 export default function SetupProfilePage() {
   const { user, refreshProfile } = useAuth();
@@ -23,22 +24,25 @@ export default function SetupProfilePage() {
       return;
     }
     setLoading(true);
-    const { error } = await supabase
-      .from("profiles")
-      .update({ username: username.toLowerCase(), bio, phone_number: phone || null })
-      .eq("user_id", user.id);
-    if (error) {
-      if (error.message.includes("duplicate")) {
-        toast.error("Username already taken!");
-      } else {
-        toast.error(error.message);
-      }
-    } else {
+    try {
+      await apiClient.patch("/profiles/me", {
+        username: username.toLowerCase(),
+        bio: bio || undefined,
+        phone_number: phone || undefined,
+      });
       await refreshProfile();
       toast.success("Profile set up! 🎉");
       navigate("/");
+    } catch (err) {
+      if (axios.isAxiosError(err) && err.response?.status === 409) {
+        toast.error("Username already taken!");
+      } else {
+        const message = axios.isAxiosError(err) ? err.response?.data?.error : null;
+        toast.error(message || "Couldn't save your profile. Try again.");
+      }
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { getBankName } from "@/lib/banks";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
 import { useAuth } from "@/contexts/AuthContext";
 import BottomNav from "@/components/BottomNav";
 import { usePremium } from "@/hooks/usePremium";
@@ -76,23 +76,13 @@ export default function WalletPage() {
     setLoading(true);
 
     const [txRes, wdRes] = await Promise.all([
-      supabase
-        .from("transactions")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(200),
-      supabase
-        .from("withdrawals")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(50),
+      walletApi.listTransactions().catch(() => []),
+      walletApi.listWithdrawals().catch(() => []),
     ]);
 
-    const txData = (txRes.data || []) as Transaction[];
+    const txData = txRes as unknown as Transaction[];
     setTransactions(txData);
-    setWithdrawals((wdRes.data || []) as Withdrawal[]);
+    setWithdrawals(wdRes as unknown as Withdrawal[]);
 
     // Calculate balances per source (only credits)
     const bal: Record<string, number> = { gift: 0, reward: 0, earning: 0, purchase: 0 };

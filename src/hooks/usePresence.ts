@@ -1,57 +1,37 @@
 import { useEffect } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/lib/apiClient";
 
 /**
- * Tracks user online presence globally.
- * Updates profiles.is_online and last_seen.
+ * Tracks user online presence globally via the Railway backend
+ * (POST /api/profiles/me/presence), which updates profiles.is_online /
+ * last_seen and opportunistically sweeps other stale users offline.
  * No longer triggers profile refresh to avoid cascading re-renders.
  */
 export function usePresence(userId: string | null | undefined) {
   useEffect(() => {
     if (!userId) return;
 
+    const heartbeat = (online: boolean, minutesDelta?: number) => {
+      apiClient.post("/profiles/me/presence", { online, minutesDelta }).catch(() => {});
+    };
+
     // Mark online once on mount
-    supabase
-      .from("profiles")
-      .update({ is_online: true, last_seen: new Date().toISOString() })
-      .eq("user_id", userId)
-      .then();
+    heartbeat(true);
 
     // Heartbeat every 45s: refresh last_seen so we can detect stale presence.
     // Continue heartbeating even when the tab is hidden so a backgrounded /
-    // minimized app keeps the user online (the DB considers anyone with
+    // minimized app keeps the user online (the backend considers anyone with
     // last_seen older than 3 min as offline).
-    const heartbeatInterval = window.setInterval(() => {
-      supabase
-        .from("profiles")
-        .update({ is_online: true, last_seen: new Date().toISOString() })
-        .eq("user_id", userId)
-        .then();
-      // Opportunistically clean up any other users that went stale.
-      supabase.rpc("cleanup_stale_presence").then();
-    }, 45000);
+    const heartbeatInterval = window.setInterval(() => heartbeat(true), 45000);
 
     // Increment online minutes every 60s (only when tab is visible)
     const minuteInterval = window.setInterval(() => {
       if (document.hidden) return;
-      supabase.rpc("increment_online_minutes", { p_user_id: userId, p_minutes: 1 }).then();
+      heartbeat(true, 1);
     }, 60000);
 
-    const markOffline = () => {
-      supabase
-        .from("profiles")
-        .update({ is_online: false, last_seen: new Date().toISOString() })
-        .eq("user_id", userId)
-        .then();
-    };
-
-    const markOnline = () => {
-      supabase
-        .from("profiles")
-        .update({ is_online: true, last_seen: new Date().toISOString() })
-        .eq("user_id", userId)
-        .then();
-    };
+    const markOffline = () => heartbeat(false);
+    const markOnline = () => heartbeat(true);
 
     // Do NOT mark offline on visibilitychange (minimize / tab switch). Just
     // refresh last_seen so the stale-presence cleanup keeps them online for

@@ -9,7 +9,8 @@ import TickerBanner from "@/components/TickerBanner";
 import SponsorFooterBanner from "@/components/monetization/SponsorFooterBanner";
 import AdSlot from "@/components/ads/AdSlot";
 import UserAvatar from "@/components/UserAvatar";
-import { supabase } from "@/integrations/supabase/client";
+import * as profilesApi from "@/api/profiles";
+import * as uploadsApi from "@/api/uploads";
 import {
   Settings,
   LogOut,
@@ -105,9 +106,7 @@ export default function ProfilePage() {
 
   useEffect(() => {
     if (!user) return;
-    supabase.rpc("has_admin_access", { p_user_id: user.id }).then(({ data }) => {
-      if (data) setIsAdmin(true);
-    });
+    profilesApi.getAdminAccess().then((ok) => { if (ok) setIsAdmin(true); }).catch(() => {});
   }, [user]);
 
   const handleLogout = async () => {
@@ -128,30 +127,13 @@ export default function ProfilePage() {
     }
 
     setUploadingAvatar(true);
-    const extension = file.name.split(".").pop() || "jpg";
-    const filePath = `${user.id}/avatar-${Date.now()}.${extension}`;
-
-    const { data, error } = await supabase.storage
-      .from("avatars")
-      .upload(filePath, file, { upsert: true });
-
-    if (error) {
-      toast.error("Couldn't upload profile photo");
-      setUploadingAvatar(false);
-      return;
-    }
-
-    const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(data.path);
-    const { error: updateError } = await supabase
-      .from("profiles")
-      .update({ avatar_url: urlData.publicUrl })
-      .eq("user_id", user.id);
-
-    if (updateError) {
-      toast.error("Couldn't save profile photo");
-    } else {
+    try {
+      const { url } = await uploadsApi.uploadFile(file, "avatars", file.name);
+      await profilesApi.updateMyProfile({ avatar_url: url });
       await refreshProfile();
       toast.success("Profile photo updated");
+    } catch {
+      toast.error("Couldn't update profile photo");
     }
 
     if (fileInputRef.current) fileInputRef.current.value = "";

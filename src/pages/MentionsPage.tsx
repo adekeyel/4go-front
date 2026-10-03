@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as mentionsApi from "@/api/mentions";
 import { useAuth } from "@/contexts/AuthContext";
 import UserAvatar from "@/components/UserAvatar";
 import BottomNav from "@/components/BottomNav";
@@ -29,32 +29,11 @@ export default function MentionsPage() {
   useEffect(() => {
     if (!user) return;
     (async () => {
-      const { data } = await supabase
-        .from("mentions")
-        .select("*")
-        .eq("mentioned_user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(50);
-      const rows = (data || []) as MentionRow[];
-      const ids = [...new Set(rows.map((r) => r.mentioner_id))];
-      const { data: profiles } = ids.length
-        ? await supabase
-            .from("profiles")
-            .select("user_id, display_name, username, avatar_url")
-            .in("user_id", ids)
-        : { data: [] as { user_id: string; display_name: string | null; username: string | null; avatar_url: string | null }[] };
-      const map = new Map((profiles || []).map((p) => [p.user_id, p]));
-      setItems(rows.map((r) => ({ ...r, mentioner: map.get(r.mentioner_id) })));
+      const rows = await mentionsApi.listMentions().catch(() => [] as MentionRow[]);
+      setItems(rows as MentionRow[]);
       setLoading(false);
-
       // Mark all as read
-      const unread = rows.filter((r) => !r.read_at).map((r) => r.id);
-      if (unread.length) {
-        await supabase
-          .from("mentions")
-          .update({ read_at: new Date().toISOString() })
-          .in("id", unread);
-      }
+      if (rows.some((r) => !r.read_at)) await mentionsApi.markMentionsRead().catch(() => {});
     })();
     // user?.id (primitive) used deliberately to avoid re-fetching on every auth refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps

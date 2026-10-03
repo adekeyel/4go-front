@@ -1,4 +1,4 @@
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/lib/apiClient";
 
 interface BlockUserParams {
   blockerId: string;
@@ -15,58 +15,52 @@ interface ModerationReportParams {
   targetMessageId?: string;
 }
 
-export async function blockUser({ blockerId, blockedId, reason }: BlockUserParams) {
-  const result = await supabase.from("user_blocks").upsert(
-    {
-      blocker_id: blockerId,
-      blocked_id: blockedId,
-      reason: reason?.trim() || null,
-    },
-    { onConflict: "blocker_id,blocked_id" }
-  );
-
-  if (!result.error) {
-    await supabase
-      .from("friends")
-      .delete()
-      .or(
-        `and(requester_id.eq.${blockerId},addressee_id.eq.${blockedId}),and(requester_id.eq.${blockedId},addressee_id.eq.${blockerId})`
-      );
+// blockerId is unused now (the backend infers it from the auth token) but
+// kept in the signature so every existing call site stays unchanged.
+export async function blockUser({ blockedId, reason }: BlockUserParams) {
+  try {
+    await apiClient.post("/friends/block", { blockedId, reason: reason?.trim() || undefined });
+    return { error: null };
+  } catch (error) {
+    return { error };
   }
-
-  return result;
 }
 
-export async function unblockUser(blockerId: string, blockedId: string) {
-  return supabase
-    .from("user_blocks")
-    .delete()
-    .eq("blocker_id", blockerId)
-    .eq("blocked_id", blockedId);
+export async function unblockUser(_blockerId: string, blockedId: string) {
+  try {
+    await apiClient.delete(`/friends/block/${blockedId}`);
+    return { error: null };
+  } catch (error) {
+    return { error };
+  }
 }
 
-export async function fetchBlockedUsers(blockerId: string) {
-  return supabase
-    .from("user_blocks")
-    .select("blocked_id, reason, created_at")
-    .eq("blocker_id", blockerId)
-    .order("created_at", { ascending: false });
+export async function fetchBlockedUsers(_blockerId: string) {
+  try {
+    const { data } = await apiClient.get("/friends/block");
+    return { data, error: null };
+  } catch (error) {
+    return { data: [], error };
+  }
 }
 
 export async function submitModerationReport({
-  reporterId,
   reason,
   details,
   targetUserId,
   targetRoomId,
   targetMessageId,
 }: ModerationReportParams) {
-  return supabase.from("moderation_reports").insert({
-    reporter_id: reporterId,
-    target_user_id: targetUserId || null,
-    target_room_id: targetRoomId || null,
-    target_message_id: targetMessageId || null,
-    reason: reason.trim(),
-    details: details?.trim() || null,
-  });
+  try {
+    await apiClient.post("/moderation/reports", {
+      targetUserId: targetUserId || undefined,
+      targetRoomId: targetRoomId || undefined,
+      targetMessageId: targetMessageId || undefined,
+      reason: reason.trim(),
+      details: details?.trim() || undefined,
+    });
+    return { error: null };
+  } catch (error) {
+    return { error };
+  }
 }

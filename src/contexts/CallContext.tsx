@@ -1,8 +1,10 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback, ReactNode } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { useSocket } from "@/sockets/SocketContext";
 import { toast } from "sonner";
 import { canMakeVoiceCall, canMakeVideoCall, callPermissionDenialMessage } from "@/lib/callPermissions";
+import * as callsApi from "@/api/calls";
+import { supabase } from "@/integrations/supabase/client";
 
 export type CallType = "voice" | "video";
 export type CallState = "idle" | "calling" | "ringing" | "connected" | "ended";
@@ -13,6 +15,7 @@ interface IncomingCall {
   type: CallType;
   roomId: string;
   callId: string;
+  sdp?: RTCSessionDescriptionInit;
 }
 
 export interface RemoteParticipant {
@@ -61,17 +64,6 @@ const ICE_SERVERS: RTCIceServer[] = [
 
 const MAX_PARTICIPANTS = 3; // max 4-way (self + 3 others)
 
-async function waitForChannelJoined(channel: ReturnType<typeof supabase.channel>, timeoutMs = 4000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const state = (channel as unknown as { state?: string }).state;
-    if (state === "joined") return true;
-    if (state === "closed" || state === "errored") return false;
-    await new Promise((resolve) => window.setTimeout(resolve, 100));
-  }
-  return false;
-}
-
 interface PeerEntry {
   pc: RTCPeerConnection;
   stream: MediaStream;
@@ -95,6 +87,7 @@ function handleMediaError(err: unknown, type: CallType) {
 
 export function CallProvider({ children }: { children: ReactNode }) {
   const { user, profile } = useAuth();
+  const socket = useSocket();
   const [callState, setCallState] = useState<CallState>("idle");
   const [callType, setCallType] = useState<CallType>("voice");
   const [callRoomId, setCallRoomId] = useState<string | null>(null);
@@ -114,11 +107,8 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
 
   const callIdRef = useRef<string | null>(null);
-  const callChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const dmChannelsRef = useRef<Map<string, ReturnType<typeof supabase.channel>>>(new Map());
   const callStateRef = useRef<CallState>("idle");
   const callTypeRef = useRef<CallType>("voice");
-  const isInitiatorRef = useRef(false);
   const callLogIdRef = useRef<string | null>(null);
   const initialPeerIdRef = useRef<string | null>(null);
   const incomingCallRef = useRef<IncomingCall | null>(null);
@@ -136,7 +126,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
   // Enforced here (not just in the UI) so nothing — a stale button, a
   // deep-linked /call/:id, or a group "add participant" — can start or
-  // accept a call type the current rank isn't allowed to use.
+  // accept a call type the current rank isn't allowed to use. The backend
+  // (POST /api/calls and the call:invite socket handler) enforces the same
+  // rule independently.
   const hasCallPermission = useCallback((type: CallType) => {
     return type === "video" ? canMakeVideoCall(rankRef.current) : canMakeVoiceCall(rankRef.current);
   }, []);
@@ -180,7 +172,6 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
   const startVibrationLoop = useCallback(() => {
     try {
-      navigator.vibrate?.([600, 400, 600, 400]);
       const w = window as typeof window & { __callVibrateInterval?: number };
       w.__callVibrateInterval = window.setInterval(() => {
         try { navigator.vibrate?.([600, 400, 600, 400]); } catch { /* ignore */ }
@@ -264,6 +255,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
     }
   }, [playMediaElement]);
 
+  const finalizeCallLog = useCallback((status: "answered" | "declined" | "cancelled" | "missed") => {
+    if (!callLogIdRef.current) return;
+    void callsApi.updateCallStatus(callLogIdRef.current, status).catch((err) => console.warn("call log update failed", err));
+  }, []);
+
   // ---------- Cleanup ----------
   const cleanup = useCallback(() => {
     stopRingtone();
@@ -283,11 +279,6 @@ export function CallProvider({ children }: { children: ReactNode }) {
     screenStreamRef.current = null;
     cameraTrackRef.current = null;
 
-    if (callChannelRef.current) {
-      try { supabase.removeChannel(callChannelRef.current); } catch { /* ignore */ }
-      callChannelRef.current = null;
-    }
-
     [localVideoRef.current, remoteVideoRef.current, remoteAudioRef.current].forEach((el) => {
       if (!el) return;
       el.pause();
@@ -306,17 +297,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setIsScreenSharing(false);
     setIsSpeakerOn(true);
     callIdRef.current = null;
-    isInitiatorRef.current = false;
     callLogIdRef.current = null;
     initialPeerIdRef.current = null;
   }, [stopRingtone, markCallHandled, closeCallNotifications]);
 
-  // ---------- Send via call channel ----------
-  const sendSignal = useCallback((event: string, payload: Record<string, unknown>) => {
-    const ch = callChannelRef.current;
-    if (!ch) return;
-    ch.send({ type: "broadcast", event, payload: { ...payload, from: user?.id } });
-  }, [user?.id]);
+  // ---------- Send a signal over the socket (offer/answer/ice/leave/reject/join-mesh) ----------
+  const sendSignal = useCallback((to: string, signal: Record<string, unknown>) => {
+    if (!socket || !callIdRef.current) return;
+    socket.emit("call:signal", { callId: callIdRef.current, to, signal });
+  }, [socket]);
 
   // ---------- Create a peer entry ----------
   const createPeer = useCallback((peerId: string, name: string): PeerEntry => {
@@ -333,9 +322,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     const stream = new MediaStream();
 
     pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        sendSignal("ice", { to: peerId, candidate: e.candidate.toJSON() });
-      }
+      if (e.candidate) sendSignal(peerId, { type: "ice", candidate: e.candidate.toJSON() });
     };
 
     pc.ontrack = (e) => {
@@ -343,8 +330,6 @@ export function CallProvider({ children }: { children: ReactNode }) {
       if (!entry) return;
       const incoming = e.streams[0];
       if (incoming) {
-        // Replace the placeholder MediaStream with the actual remote stream
-        // so audio/video elements receive a stream that already has tracks.
         entry.stream = incoming;
       } else if (!entry.stream.getTracks().some((t) => t.id === e.track.id)) {
         entry.stream.addTrack(e.track);
@@ -365,6 +350,17 @@ export function CallProvider({ children }: { children: ReactNode }) {
       if (pc.connectionState === "failed") {
         try { pc.restartIce(); } catch { /* ignore */ }
       }
+      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+        const entry = peersRef.current.get(peerId);
+        if (entry) {
+          peersRef.current.delete(peerId);
+          refreshParticipantsState();
+          if (peersRef.current.size === 0 && callStateRef.current !== "idle") {
+            finalizeCallLog(callStateRef.current === "connected" ? "answered" : "cancelled");
+            cleanup();
+          }
+        }
+      }
     };
     pc.oniceconnectionstatechange = () => {
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
@@ -373,103 +369,13 @@ export function CallProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    // add local tracks
     const local = localStreamRef.current;
-    if (local) {
-      local.getTracks().forEach((t) => pc.addTrack(t, local));
-    }
+    if (local) local.getTracks().forEach((t) => pc.addTrack(t, local));
 
     const entry: PeerEntry = { pc, stream, name, pendingCandidates: [], hasRemoteDesc: false };
     peersRef.current.set(peerId, entry);
     return entry;
-  }, [sendSignal, refreshParticipantsState, stopRingtone]);
-
-  // ---------- Subscribe to a call channel (initiator OR callee) ----------
-  const subscribeCallChannel = useCallback((callId: string) => {
-    if (callChannelRef.current) return callChannelRef.current;
-    const channel = supabase.channel(`call-${callId}`, { config: { broadcast: { ack: false, self: false } } });
-
-    channel
-      .on("broadcast", { event: "offer" }, async ({ payload }) => {
-        const { to, from, name, callType: ct, sdp } = payload as { to: string; from: string; name: string; callType: CallType; sdp: RTCSessionDescriptionInit };
-        if (to !== user?.id) return;
-        if (callStateRef.current === "idle") return; // shouldn't happen for established channel
-        const entry = peersRef.current.get(from) ?? createPeer(from, name || "User");
-        try {
-          await entry.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-          entry.hasRemoteDesc = true;
-          const drained = entry.pendingCandidates.splice(0);
-          for (const c of drained) { try { await entry.pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ } }
-          const answer = await entry.pc.createAnswer();
-          await entry.pc.setLocalDescription(answer);
-          sendSignal("answer", { to: from, sdp: { type: answer.type, sdp: answer.sdp } });
-          stopRingtone();
-          callStateRef.current = "connected";
-          setCallState("connected");
-          if (ct) setCallType(ct);
-        } catch (err) { console.error("offer handle:", err); }
-      })
-      .on("broadcast", { event: "ready" }, async ({ payload }) => {
-        // Callee has subscribed and is ready to receive the offer.
-        const { to, from, name } = payload as { to: string; from: string; name?: string };
-        if (to !== user?.id) return;
-        try {
-          const entry = peersRef.current.get(from) ?? createPeer(from, name || "User");
-          const offer = await entry.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: callTypeRef.current === "video" });
-          await entry.pc.setLocalDescription(offer);
-          sendSignal("offer", { to: from, name: (profile as { display_name?: string } | null)?.display_name || "You", callType: callTypeRef.current, sdp: { type: offer.type, sdp: offer.sdp } });
-        } catch (err) { console.error("ready handle:", err); }
-      })
-      .on("broadcast", { event: "answer" }, async ({ payload }) => {
-        const { to, from, sdp } = payload as { to: string; from: string; sdp: RTCSessionDescriptionInit };
-        if (to !== user?.id) return;
-        const entry = peersRef.current.get(from);
-        if (!entry) return;
-        try {
-          await entry.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-          entry.hasRemoteDesc = true;
-          const drained = entry.pendingCandidates.splice(0);
-          for (const c of drained) { try { await entry.pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ } }
-          // Callee picked up — stop ringback. Only mark connected when ICE/media
-          // actually connects; otherwise the UI can say connected with no media.
-          stopRingtone();
-          callStateRef.current = "connected";
-          setCallState("connected");
-        } catch (err) { console.error("answer handle:", err); }
-      })
-      .on("broadcast", { event: "ice" }, async ({ payload }) => {
-        const { to, from, candidate } = payload as { to: string; from: string; candidate: RTCIceCandidateInit };
-        if (to !== user?.id) return;
-        const entry = peersRef.current.get(from);
-        if (!entry) return;
-        if (entry.hasRemoteDesc) {
-          try { await entry.pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch { /* ignore */ }
-        } else {
-          entry.pendingCandidates.push(candidate);
-        }
-      })
-      .on("broadcast", { event: "leave" }, ({ payload }) => {
-        const { from } = payload as { from: string };
-        const entry = peersRef.current.get(from);
-        if (entry) { try { entry.pc.close(); } catch { /* ignore */ } peersRef.current.delete(from); }
-        refreshParticipantsState();
-        if (peersRef.current.size === 0) cleanup();
-      })
-      .on("broadcast", { event: "reject" }, ({ payload }) => {
-        const { from } = payload as { from: string };
-        const entry = peersRef.current.get(from);
-        if (entry) { try { entry.pc.close(); } catch { /* ignore */ } peersRef.current.delete(from); }
-        refreshParticipantsState();
-        if (peersRef.current.size === 0) {
-          toast.info("Call declined");
-          cleanup();
-        }
-      })
-      .subscribe();
-
-    callChannelRef.current = channel;
-    return channel;
-  }, [user?.id, profile, createPeer, sendSignal, cleanup, refreshParticipantsState, stopRingtone]);
+  }, [sendSignal, refreshParticipantsState, stopRingtone, finalizeCallLog, cleanup]);
 
   // ---------- Get local media (idempotent) ----------
   const ensureLocalStream = useCallback(async (type: CallType): Promise<MediaStream> => {
@@ -492,12 +398,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const callId = `${roomId}-${Date.now()}`;
-    callIdRef.current = callId;
     callRoomIdRef.current = roomId;
     callStateRef.current = "calling";
     callTypeRef.current = type;
-    isInitiatorRef.current = true;
     initialPeerIdRef.current = peerId;
     setCallType(type);
     setCallRoomId(roomId);
@@ -514,65 +417,44 @@ export function CallProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    // Log
     try {
-      const { data: row } = await supabase.from("call_logs").insert({
-        room_id: roomId,
-        caller_id: user.id,
-        callee_id: peerId,
-        call_type: type,
-        status: "cancelled",
-        duration_seconds: 0,
-      }).select("id").single();
-      callLogIdRef.current = row?.id ?? null;
-    } catch { /* ignore */ }
+      // The call_logs row's id is the callId used for all signaling — the
+      // backend re-checks the callee's rank before this ever reaches them.
+      const call = await callsApi.startCall(roomId, peerId, type);
+      callIdRef.current = call.id;
+      callLogIdRef.current = call.id;
 
-    try {
-      const callChannel = subscribeCallChannel(callId);
-      await waitForChannelJoined(callChannel);
-      // Pre-create the peer entry so tracks are bound. Send the offer now and
-      // resend on "ready"; this prevents slow/missed ready events from leaving
-      // both sides stuck on Calling with no media.
       const entry = createPeer(peerId, peerName);
       const offer = await entry.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: type === "video" });
       await entry.pc.setLocalDescription(offer);
 
-      const callerName = (profile as { display_name?: string } | null)?.display_name || "Someone";
-      const invitePayload = {
-        callId,
-        from: user.id,
-        name: callerName,
-        callType: type,
+      const callerName = profile?.display_name || profile?.username || "Someone";
+      socket?.emit("call:invite", {
+        callId: call.id,
         roomId,
-      };
+        calleeId: peerId,
+        callType: type,
+        callerName,
+        callerAvatarUrl: profile?.avatar_url,
+        sdp: offer,
+      });
 
-      // Notify peer through the room's DM channel only after caller media and
-      // call-channel subscription are ready, so fast answers don't lose signals.
-      const dmChannel = dmChannelsRef.current.get(roomId);
-      if (dmChannel) {
-        await waitForChannelJoined(dmChannel);
-        dmChannel.send({
-          type: "broadcast",
-          event: "call-invite",
-          payload: { ...invitePayload, sdp: { type: offer.type, sdp: offer.sdp } },
-        });
-      }
-
-      // Best-effort push for locked/closed app delivery.
+      // Best-effort push for locked/closed app delivery — unchanged from
+      // before (Supabase Edge Function, separate from the DB migration).
       void supabase.functions.invoke("send-push", {
         body: {
           user_ids: [peerId],
           title: `${callerName} is calling`,
           body: `Incoming ${type} call — tap to answer`,
           data: {
-            navigateTo: `/call/${callId}`,
-            tag: `call-${callId}`,
+            navigateTo: `/call/${call.id}`,
+            tag: `call-${call.id}`,
             kind: "incoming_call",
             callerName,
             callerId: user.id,
             callType: type,
             roomId,
-            callId,
+            callId: call.id,
           },
         },
       });
@@ -581,7 +463,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       handleMediaError(err, type);
       cleanup();
     }
-  }, [user, profile, hasCallPermission, stopRingtone, playLoopingAudio, ensureLocalStream, subscribeCallChannel, createPeer, cleanup]);
+  }, [user, profile, hasCallPermission, stopRingtone, playLoopingAudio, ensureLocalStream, createPeer, socket, cleanup]);
 
   // ---------- Add another participant (mesh, max 4 total) ----------
   const addParticipant = useCallback(async (peerId: string, peerName: string) => {
@@ -595,78 +477,69 @@ export function CallProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (peersRef.current.has(peerId) || peerId === user.id) return;
-    const callId = callIdRef.current;
     const roomId = callRoomId;
-    if (!callId || !roomId) return;
-
-    // Find a DM room between current user and the new peer to send invite via existing DM channel,
-    // OR fall back to inviting directly through call-channel "invite" event (peer is listening on user's DMs).
-    // For simplicity we send through any DM channel they share; otherwise rely on push.
-    const inviteSent = Array.from(dmChannelsRef.current.values()).some((ch) => {
-      try {
-        ch.send({
-          type: "broadcast",
-          event: "call-invite",
-          payload: {
-            callId,
-            from: user.id,
-            name: (profile as { display_name?: string } | null)?.display_name || "Someone",
-            callType: callTypeRef.current,
-            roomId,
-            targetUserId: peerId,
-          },
-        });
-        return true;
-      } catch { return false; }
-    });
+    if (!roomId) return;
 
     try {
+      const call = await callsApi.startCall(roomId, peerId, callTypeRef.current);
+      const stream = await ensureLocalStream(callTypeRef.current);
+      const entry = createPeer(peerId, peerName);
+      stream.getTracks().forEach((t) => {
+        if (!entry.pc.getSenders().some((s) => s.track === t)) entry.pc.addTrack(t, stream);
+      });
+      const offer = await entry.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: callTypeRef.current === "video" });
+      await entry.pc.setLocalDescription(offer);
+
+      const callerName = profile?.display_name || profile?.username || "Someone";
+      // A group-call invite uses its own callId/signaling pair with the new
+      // participant, then fans out via "join-mesh" once they answer (see the
+      // "answer" branch in the socket listener below) so every existing
+      // participant also opens a direct connection to them.
+      socket?.emit("call:invite", {
+        callId: call.id,
+        roomId,
+        calleeId: peerId,
+        callType: callTypeRef.current,
+        callerName,
+        callerAvatarUrl: profile?.avatar_url,
+        sdp: offer,
+      });
+
       void supabase.functions.invoke("send-push", {
         body: {
           user_ids: [peerId],
           title: `Group ${callTypeRef.current} call`,
-          body: `${(profile as { display_name?: string } | null)?.display_name || "Someone"} added you to a call`,
+          body: `${callerName} added you to a call`,
           data: {
-            navigateTo: `/call/${callId}`,
-            tag: `call-${callId}`,
+            navigateTo: `/call/${call.id}`,
+            tag: `call-${call.id}`,
             kind: "incoming_call",
-            callerName: (profile as { display_name?: string } | null)?.display_name || "Someone",
+            callerName,
             callerId: user.id,
             callType: callTypeRef.current,
             roomId,
-            callId,
+            callId: call.id,
           },
         },
       });
-    } catch { /* ignore */ }
-    if (!inviteSent) toast.info("Invite sent via push notification");
 
-    try {
-      createPeer(peerId, peerName);
       toast.success(`Inviting ${peerName} to call…`);
-    } catch (err) { console.error("addParticipant:", err); }
-  }, [user, profile, callRoomId, hasCallPermission, createPeer]);
+    } catch (err) {
+      console.error("addParticipant:", err);
+      toast.error("Couldn't add that person to the call.");
+    }
+  }, [user, profile, callRoomId, hasCallPermission, ensureLocalStream, createPeer, socket]);
 
   // ---------- Answer (callee) ----------
   const answerCall = useCallback(async () => {
-    if (!incomingCall || !user) return;
+    if (!incomingCall || !user || !socket) return;
     if (!hasCallPermission(incomingCall.type)) {
-      // Rank doesn't permit this call type on the receiving side either —
-      // decline automatically rather than letting it connect.
       toast.error(callPermissionDenialMessage(incomingCall.type));
       stopRingtone();
       markCallHandled(incomingCall.callId);
       closeCallNotifications(incomingCall.roomId, incomingCall.callId);
-      const dm = dmChannelsRef.current.get(incomingCall.roomId);
-      dm?.send({ type: "broadcast", event: "call-reject", payload: { callId: incomingCall.callId, from: user.id } });
-      void supabase.from("call_logs").insert({
-        room_id: incomingCall.roomId,
-        caller_id: incomingCall.from,
-        callee_id: user.id,
-        call_type: incomingCall.type,
-        status: "declined",
-        duration_seconds: 0,
-      });
+      socket.emit("call:signal", { callId: incomingCall.callId, to: incomingCall.from, signal: { type: "reject", reason: "rank_not_permitted" } });
+      void callsApi.updateCallStatus(incomingCall.callId, "declined").catch(() => {});
       cleanup();
       return;
     }
@@ -679,97 +552,65 @@ export function CallProvider({ children }: { children: ReactNode }) {
     callTypeRef.current = answeringCall.type;
     setIncomingCall(null);
     stopRingtone();
-    const type = incomingCall.type;
+    const type = answeringCall.type;
     setCallType(type);
-    setCallRoomId(incomingCall.roomId);
+    setCallRoomId(answeringCall.roomId);
     setCallState("calling");
-    callIdRef.current = incomingCall.callId;
-    initialPeerIdRef.current = incomingCall.from;
-    isInitiatorRef.current = false;
+    callIdRef.current = answeringCall.callId;
+    callLogIdRef.current = answeringCall.callId;
+    initialPeerIdRef.current = answeringCall.from;
 
     try {
       await ensureLocalStream(type);
-      // Subscribe to the call channel and only emit "ready" once the
-      // realtime channel has actually joined — using a fixed timeout
-      // can drop the signal on slow connections, leaving the caller's
-      // offer un-sent and no audio/video flowing.
-      const ch = subscribeCallChannel(incomingCall.callId);
-      const entry = createPeer(incomingCall.from, incomingCall.name);
-      await waitForChannelJoined(ch);
-      if (entry.hasRemoteDesc) {
+      const entry = createPeer(answeringCall.from, answeringCall.name);
+      if (answeringCall.sdp) {
+        await entry.pc.setRemoteDescription(new RTCSessionDescription(answeringCall.sdp));
+        entry.hasRemoteDesc = true;
+        const drained = entry.pendingCandidates.splice(0);
+        for (const c of drained) { try { await entry.pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ } }
         const answer = await entry.pc.createAnswer();
         await entry.pc.setLocalDescription(answer);
-        sendSignal("answer", { to: incomingCall.from, sdp: { type: answer.type, sdp: answer.sdp } });
-        callStateRef.current = "connected";
-        setCallState("connected");
+        socket.emit("call:signal", { callId: answeringCall.callId, to: answeringCall.from, signal: { type: "answer", sdp: answer } });
       }
-      sendSignal("ready", {
-        to: incomingCall.from,
-        name: (profile as { display_name?: string } | null)?.display_name || "User",
-      });
-      // Move to "calling" until ICE actually connects; the connectionstate /
-      // iceconnectionstate handler will flip us to "connected" when media flows.
-      if (!entry.hasRemoteDesc) setCallState("calling");
     } catch (err) {
       console.error("answerCall:", err);
       handleMediaError(err, type);
       cleanup();
     }
-  }, [incomingCall, user, profile, hasCallPermission, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, subscribeCallChannel, createPeer, sendSignal, cleanup]);
+  }, [incomingCall, user, socket, hasCallPermission, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, createPeer, cleanup]);
 
   const endCall = useCallback(() => {
-    const activeRoomId = callRoomIdRef.current;
-    const activeCallId = callIdRef.current;
+    peersRef.current.forEach((_entry, peerId) => sendSignal(peerId, { type: "leave" }));
+
     const notifyUserIds = Array.from(new Set([
       initialPeerIdRef.current,
       ...Array.from(peersRef.current.keys()),
     ].filter((id): id is string => Boolean(id && id !== user?.id))));
-    sendSignal("leave", {});
-    if (activeRoomId && activeCallId) {
-      dmChannelsRef.current.get(activeRoomId)?.send({
-        type: "broadcast",
-        event: "call-end",
-        payload: { callId: activeCallId, from: user?.id },
+    if (notifyUserIds.length > 0 && callIdRef.current) {
+      void supabase.functions.invoke("send-push", {
+        body: {
+          user_ids: notifyUserIds,
+          title: "Call ended",
+          body: "The call has ended",
+          data: { kind: "call_cancelled", tag: `call-${callIdRef.current}`, callId: callIdRef.current, roomId: callRoomIdRef.current },
+        },
       });
-      if (notifyUserIds.length > 0) {
-        void supabase.functions.invoke("send-push", {
-          body: {
-            user_ids: notifyUserIds,
-            title: "Call ended",
-            body: "The call has ended",
-            data: { kind: "call_cancelled", tag: `call-${activeCallId}`, callId: activeCallId, roomId: activeRoomId },
-          },
-        });
-      }
     }
-    // Update log
-    if (callLogIdRef.current) {
-      const status = callStateRef.current === "connected" ? "answered" : "cancelled";
-      void supabase.from("call_logs").update({ status }).eq("id", callLogIdRef.current);
-    }
+
+    finalizeCallLog(callStateRef.current === "connected" ? "answered" : "cancelled");
     cleanup();
-  }, [sendSignal, user?.id, cleanup]);
+  }, [sendSignal, user?.id, finalizeCallLog, cleanup]);
 
   const rejectCall = useCallback(() => {
     stopRingtone();
-    if (incomingCall) {
+    if (incomingCall && socket) {
       markCallHandled(incomingCall.callId);
       closeCallNotifications(incomingCall.roomId, incomingCall.callId);
-      // Send reject via the call channel after subscribing briefly, OR via DM channel.
-      const dm = dmChannelsRef.current.get(incomingCall.roomId);
-      dm?.send({ type: "broadcast", event: "call-reject", payload: { callId: incomingCall.callId, from: user?.id } });
-      // Log declined for callee
-      void supabase.from("call_logs").insert({
-        room_id: incomingCall.roomId,
-        caller_id: incomingCall.from,
-        callee_id: user?.id,
-        call_type: incomingCall.type,
-        status: "declined",
-        duration_seconds: 0,
-      });
+      socket.emit("call:signal", { callId: incomingCall.callId, to: incomingCall.from, signal: { type: "reject", reason: "declined" } });
+      void callsApi.updateCallStatus(incomingCall.callId, "declined").catch(() => {});
     }
     cleanup();
-  }, [incomingCall, user?.id, stopRingtone, markCallHandled, closeCallNotifications, cleanup]);
+  }, [incomingCall, socket, stopRingtone, markCallHandled, closeCallNotifications, cleanup]);
 
   const toggleMute = useCallback(() => {
     const t = localStreamRef.current?.getAudioTracks()[0];
@@ -821,7 +662,6 @@ export function CallProvider({ children }: { children: ReactNode }) {
       const display = await md.getDisplayMedia!({ video: true, audio: false });
       const screenTrack = display.getVideoTracks()[0];
       if (!screenTrack) return;
-      // remember camera track from first peer
       const first = peersRef.current.values().next().value as PeerEntry | undefined;
       const camSender = first?.pc.getSenders().find((s) => s.track?.kind === "video");
       cameraTrackRef.current = camSender?.track ?? null;
@@ -847,98 +687,141 @@ export function CallProvider({ children }: { children: ReactNode }) {
     }
   }, [isScreenSharing]);
 
-  // ---------- Subscribe to DM channels for incoming call invites ----------
+  // ---------- Global socket listener for incoming calls & signaling ----------
+  // Unlike the old per-DM-room Supabase channel subscriptions, the backend
+  // addresses these directly to this user's personal socket room, so a
+  // single always-on listener covers every room without enumerating DMs.
   useEffect(() => {
-    if (!user) return;
-    let mounted = true;
+    if (!socket || !user) return;
 
-    const setup = async () => {
-      const { data: memberships } = await supabase.from("room_members").select("room_id").eq("user_id", user.id);
-      if (!memberships || !mounted) return;
-      const roomIds = memberships.map((m) => m.room_id);
-      if (roomIds.length === 0) return;
-      const { data: rooms } = await supabase.from("rooms").select("id").in("id", roomIds).eq("type", "dm");
-      if (!rooms || !mounted) return;
+    const onInvite = (payload: {
+      callId: string;
+      roomId: string;
+      callerId: string;
+      callType: CallType;
+      callerName: string;
+      callerAvatarUrl?: string | null;
+      sdp: RTCSessionDescriptionInit;
+    }) => {
+      if (payload.callerId === user.id) return;
+      if (handledCallIdsRef.current.has(payload.callId)) return;
+      if (callStateRef.current !== "idle") {
+        socket.emit("call:signal", { callId: payload.callId, to: payload.callerId, signal: { type: "reject", reason: "busy" } });
+        return;
+      }
+      if (incomingCallRef.current?.callId === payload.callId) return;
+      if (!hasCallPermission(payload.callType)) {
+        // Don't even ring — this rank isn't allowed to receive this call type.
+        // The server already checked this too; this is belt-and-braces.
+        markCallHandled(payload.callId);
+        socket.emit("call:signal", { callId: payload.callId, to: payload.callerId, signal: { type: "reject", reason: "rank_not_permitted" } });
+        void callsApi.updateCallStatus(payload.callId, "declined").catch(() => {});
+        return;
+      }
 
-      for (const room of rooms) {
-        if (dmChannelsRef.current.has(room.id)) continue;
-        const ch = supabase.channel(`call-room-${room.id}`);
-        ch.on("broadcast", { event: "call-invite" }, ({ payload }) => {
-          const p = payload as { callId: string; from: string; name: string; callType: CallType; roomId: string; targetUserId?: string; sdp?: RTCSessionDescriptionInit };
-          if (p.from === user.id) return;
-          if (p.targetUserId && p.targetUserId !== user.id) return;
-          if (handledCallIdsRef.current.has(p.callId)) return;
-          if (callStateRef.current !== "idle") return;
-          if (incomingCallRef.current?.callId === p.callId) return;
-          if (!hasCallPermission(p.callType)) {
-            // Don't even ring — this rank isn't allowed to receive this call type.
-            // Decline immediately so the caller isn't left hanging.
-            markCallHandled(p.callId);
-            void supabase.from("call_logs").insert({
-              room_id: p.roomId,
-              caller_id: p.from,
-              callee_id: user.id,
-              call_type: p.callType,
-              status: "declined",
-              duration_seconds: 0,
-            });
-            const dm = dmChannelsRef.current.get(p.roomId);
-            dm?.send({ type: "broadcast", event: "call-reject", payload: { callId: p.callId, from: user.id } });
-            return;
-          }
-          callIdRef.current = p.callId;
-          if (p.sdp) {
-            const entry = createPeer(p.from, p.name || "User");
-            void entry.pc.setRemoteDescription(new RTCSessionDescription(p.sdp)).then(async () => {
-              entry.hasRemoteDesc = true;
-              const drained = entry.pendingCandidates.splice(0);
-              for (const c of drained) { try { await entry.pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ } }
-            }).catch((err) => console.error("incoming invite offer:", err));
-          }
-          setIncomingCall({ from: p.from, name: p.name, type: p.callType, roomId: p.roomId, callId: p.callId });
-          setCallType(p.callType);
-          setCallRoomId(p.roomId);
-          setCallState("ringing");
-          stopRingtone();
-          closeCallNotifications(p.roomId, p.callId);
-          playLoopingAudio("/ringtone.mp3", "__callRingtone");
-          startVibrationLoop();
-          if (ringTimeoutRef.current) window.clearTimeout(ringTimeoutRef.current);
-          ringTimeoutRef.current = window.setTimeout(() => {
-            if (incomingCallRef.current?.callId === p.callId && callStateRef.current === "ringing") {
-              markCallHandled(p.callId);
-              cleanup();
-            }
-          }, 60_000);
-        }).on("broadcast", { event: "call-reject" }, ({ payload }) => {
-          const p = payload as { from: string; callId?: string };
-          if (p.from === user.id) return;
-          if (p.callId) markCallHandled(p.callId);
-          if (callStateRef.current === "calling") {
-            toast.info("Call declined");
-            cleanup();
-          }
-        }).on("broadcast", { event: "call-end" }, ({ payload }) => {
-          const p = payload as { from: string; callId?: string };
-          if (p.from === user.id) return;
-          if (p.callId) markCallHandled(p.callId);
-          if (!p.callId || incomingCallRef.current?.callId === p.callId || callIdRef.current === p.callId) {
-            cleanup();
-          }
-        }).subscribe();
-        dmChannelsRef.current.set(room.id, ch);
+      callIdRef.current = payload.callId;
+      setIncomingCall({
+        from: payload.callerId,
+        name: payload.callerName,
+        type: payload.callType,
+        roomId: payload.roomId,
+        callId: payload.callId,
+        sdp: payload.sdp,
+      });
+      setCallType(payload.callType);
+      setCallRoomId(payload.roomId);
+      setCallState("ringing");
+      stopRingtone();
+      closeCallNotifications(payload.roomId, payload.callId);
+      playLoopingAudio("/ringtone.mp3", "__callRingtone");
+      startVibrationLoop();
+      if (ringTimeoutRef.current) window.clearTimeout(ringTimeoutRef.current);
+      ringTimeoutRef.current = window.setTimeout(() => {
+        if (incomingCallRef.current?.callId === payload.callId && callStateRef.current === "ringing") {
+          markCallHandled(payload.callId);
+          void callsApi.updateCallStatus(payload.callId, "missed").catch(() => {});
+          cleanup();
+        }
+      }, 60_000);
+    };
+
+    const onSignal = async ({ callId, from, signal }: { callId: string; from: string; signal: any }) => {
+      if (callId !== callIdRef.current) return;
+
+      if (signal.type === "reject") {
+        markCallHandled(callId);
+        if (callStateRef.current === "calling") {
+          toast.info(signal.reason === "rank_not_permitted" ? "They're not able to accept this call yet." : signal.reason === "busy" ? "They're on another call." : "Call declined");
+          finalizeCallLog("declined");
+          cleanup();
+        }
+        return;
+      }
+      if (signal.type === "leave") {
+        const entry = peersRef.current.get(from);
+        if (entry) { try { entry.pc.close(); } catch { /* ignore */ } peersRef.current.delete(from); }
+        refreshParticipantsState();
+        if (peersRef.current.size === 0) {
+          finalizeCallLog(callStateRef.current === "connected" ? "answered" : "cancelled");
+          cleanup();
+        }
+        return;
+      }
+
+      let entry = peersRef.current.get(from);
+      if (signal.type === "offer") {
+        if (!entry) {
+          const stream = await ensureLocalStream(callTypeRef.current);
+          entry = createPeer(from, signal.callerName || "Participant");
+          stream.getTracks().forEach((t) => {
+            if (!entry!.pc.getSenders().some((s) => s.track === t)) entry!.pc.addTrack(t, stream);
+          });
+          await entry.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+          entry.hasRemoteDesc = true;
+          const drained = entry.pendingCandidates.splice(0);
+          for (const c of drained) { try { await entry.pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ } }
+          const answer = await entry.pc.createAnswer();
+          await entry.pc.setLocalDescription(answer);
+          sendSignal(from, { type: "answer", sdp: answer });
+        }
+      } else if (signal.type === "answer" && entry) {
+        await entry.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        entry.hasRemoteDesc = true;
+        const drained = entry.pendingCandidates.splice(0);
+        for (const c of drained) { try { await entry.pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ } }
+        // Mesh fan-out: for group calls, tell every other already-connected
+        // peer to open their own direct connection to this new one.
+        const joinedName = entry.name;
+        peersRef.current.forEach((_other, otherId) => {
+          if (otherId !== from) sendSignal(otherId, { type: "join-mesh", peerId: from, peerName: joinedName });
+        });
+      } else if (signal.type === "join-mesh") {
+        if (!peersRef.current.has(signal.peerId)) {
+          const stream = await ensureLocalStream(callTypeRef.current);
+          const newEntry = createPeer(signal.peerId, signal.peerName || "Participant");
+          stream.getTracks().forEach((t) => {
+            if (!newEntry.pc.getSenders().some((s) => s.track === t)) newEntry.pc.addTrack(t, stream);
+          });
+          const offer = await newEntry.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: callTypeRef.current === "video" });
+          await newEntry.pc.setLocalDescription(offer);
+          sendSignal(signal.peerId, { type: "offer", sdp: offer });
+        }
+      } else if (signal.type === "ice" && entry) {
+        if (entry.hasRemoteDesc) {
+          try { await entry.pc.addIceCandidate(new RTCIceCandidate(signal.candidate)); } catch { /* ignore */ }
+        } else {
+          entry.pendingCandidates.push(signal.candidate);
+        }
       }
     };
 
-    const channels = dmChannelsRef.current;
-    setup();
+    socket.on("call:invite", onInvite);
+    socket.on("call:signal", onSignal);
     return () => {
-      mounted = false;
-      channels.forEach((ch) => { try { supabase.removeChannel(ch); } catch { /* ignore */ } });
-      channels.clear();
-      stopRingtone();
+      socket.off("call:invite", onInvite);
+      socket.off("call:signal", onSignal);
     };
-  }, [user, hasCallPermission, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, createPeer, cleanup]);
+  }, [socket, user, hasCallPermission, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, ensureLocalStream, createPeer, sendSignal, refreshParticipantsState, finalizeCallLog, cleanup]);
 
   return (
     <CallContext.Provider value={{

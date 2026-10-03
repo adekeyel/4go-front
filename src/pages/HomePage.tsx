@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import * as roomsApi from "@/api/rooms";
 import { useNotificationContext } from "@/contexts/NotificationContext";
 
 import BottomNav from "@/components/BottomNav";
@@ -47,41 +47,15 @@ export default function HomePage() {
   const navigate = useNavigate();
 
   const fetchRooms = useCallback(async () => {
-    const [roomsResult, userMembershipsResult] = await Promise.all([
-      supabase
-        .from("rooms")
-        .select("*")
-        .eq("type", "public")
-        .eq("is_active", true)
-        .order("created_at", { ascending: false }),
-      user
-        ? supabase.from("room_members").select("room_id").eq("user_id", user.id)
-        : Promise.resolve({ data: [] as { room_id: string }[] }),
+    const [enriched, myMemberships] = await Promise.all([
+      roomsApi.browseRooms({ types: ["public"] }).catch(() => []),
+      user ? roomsApi.listMyRooms().catch(() => []) : Promise.resolve([]),
     ]);
-
-    const allRooms = roomsResult.data || [];
-    const roomIds = allRooms.map((r) => r.id);
-
-    const { data: counts } = roomIds.length > 0
-      ? await supabase.rpc("get_room_member_counts", { p_room_ids: roomIds })
-      : { data: [] };
-
-    const memberCounts: Record<string, number> = {};
-    (counts || []).forEach((c: { room_id: string; member_count: number }) => {
-      memberCounts[c.room_id] = c.member_count;
-    });
-
-    const enriched = allRooms.map((r) => ({
-      ...r,
-      member_count: memberCounts[r.id] || 0,
-    }));
-
-    enriched.sort((a, b) => b.member_count - a.member_count);
 
     setRooms(enriched);
 
-    const userRoomIds = (userMembershipsResult.data || []).map((m) => m.room_id);
-    setMyRooms(enriched.filter((r) => userRoomIds.includes(r.id)));
+    const userRoomIds = new Set(myMemberships.map((r) => r.id));
+    setMyRooms(enriched.filter((r) => userRoomIds.has(r.id)));
 
     setLoading(false);
   }, [user]);

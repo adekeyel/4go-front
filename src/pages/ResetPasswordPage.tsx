@@ -1,124 +1,48 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as authApi from "@/api/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { MessageCircle, Eye, EyeOff, KeyRound } from "lucide-react";
+import { MessageCircle, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
+import axios from "axios";
 
 export default function ResetPasswordPage() {
+  const [searchParams] = useSearchParams();
+  const token = searchParams.get("token");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [isValidSession, setIsValidSession] = useState(false);
-  const [hasCode, setHasCode] = useState(false);
-  const [exchanging, setExchanging] = useState(true);
-  const [exchangeError, setExchangeError] = useState("");
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-
-  // Check if there's a code but DON'T auto-exchange it (prevents prefetcher consumption)
-  useEffect(() => {
-    const code = searchParams.get("code");
-    const hash = window.location.hash;
-
-    if (code) {
-      setHasCode(true);
-      setExchanging(false);
-    } else if (hash && hash.includes("type=recovery")) {
-      setIsValidSession(true);
-      setExchanging(false);
-    } else {
-      setExchanging(false);
-    }
-
-    // Listen for auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event) => {
-        if (event === "PASSWORD_RECOVERY") {
-          setIsValidSession(true);
-          setExchanging(false);
-        }
-      }
-    );
-
-    return () => subscription.unsubscribe();
-  }, [searchParams]);
-
-  const handleExchangeCode = useCallback(async () => {
-    const code = searchParams.get("code");
-    if (!code) return;
-
-    setLoading(true);
-    setExchangeError("");
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
-      setIsValidSession(true);
-    } else {
-      setExchangeError(error.message);
-      toast.error("Link expired or already used. Please request a new one.");
-    }
-    setLoading(false);
-  }, [searchParams]);
 
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!token) return;
 
-    if (password.length < 6) {
-      toast.error("Password must be at least 6 characters");
+    if (password.length < 8) {
+      toast.error("Password must be at least 8 characters");
       return;
     }
-
     if (password !== confirmPassword) {
       toast.error("Passwords do not match");
       return;
     }
 
     setLoading(true);
-    const { error } = await supabase.auth.updateUser({ password });
-
-    if (error) {
-      toast.error(error.message);
-    } else {
-      toast.success("Password updated successfully!");
-      navigate("/");
+    try {
+      await authApi.resetPassword(token, password);
+      toast.success("Password updated. Please log in again.");
+      navigate("/login");
+    } catch (err) {
+      const message = axios.isAxiosError(err) ? err.response?.data?.error : null;
+      toast.error(message || "Reset link is invalid or has expired.");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
-  if (exchanging) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="w-10 h-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-      </div>
-    );
-  }
-
-  if (!isValidSession && hasCode && !exchangeError) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-background px-6">
-        <div className="w-full max-w-sm text-center animate-slide-up">
-          <div className="w-16 h-16 rounded-2xl gradient-primary flex items-center justify-center mb-3 mx-auto shadow-elevated">
-            <KeyRound className="w-8 h-8 text-primary-foreground" />
-          </div>
-          <h1 className="text-2xl font-display font-bold text-foreground mb-2">Reset Your Password</h1>
-          <p className="text-muted-foreground text-sm mb-6">
-            Tap the button below to continue resetting your password.
-          </p>
-          <Button
-            onClick={handleExchangeCode}
-            disabled={loading}
-            className="w-full h-12 rounded-xl gradient-primary text-primary-foreground font-semibold text-base shadow-elevated"
-          >
-            {loading ? "Verifying..." : "Continue to Reset Password"}
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isValidSession) {
+  if (!token) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-background px-6">
         <div className="w-full max-w-sm text-center animate-slide-up">
@@ -127,7 +51,7 @@ export default function ResetPasswordPage() {
           </div>
           <h1 className="text-2xl font-display font-bold text-foreground mb-2">Invalid Link</h1>
           <p className="text-muted-foreground text-sm mb-6">
-            {exchangeError || "This password reset link is invalid or has expired."}
+            This password reset link is missing its token. Request a new one.
           </p>
           <Button onClick={() => navigate("/forgot-password")} className="rounded-xl">
             Request New Link
@@ -156,6 +80,7 @@ export default function ResetPasswordPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
+              minLength={8}
               className="h-12 rounded-xl pr-12"
             />
             <button
@@ -172,6 +97,7 @@ export default function ResetPasswordPage() {
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
+            minLength={8}
             className="h-12 rounded-xl"
           />
           <Button

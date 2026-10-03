@@ -1,7 +1,9 @@
 import { useEffect, useState, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import * as friendsApi from "@/api/friends";
+import * as roomsApi from "@/api/rooms";
+import * as messagesApi from "@/api/messages";
 import { useNotificationContext } from "@/contexts/NotificationContext";
 import { useUnreadCalls } from "@/hooks/useUnreadCalls";
 
@@ -76,74 +78,39 @@ export default function DMsPage() {
 
   const fetchPendingCount = async () => {
     if (!user) return;
-    const { count } = await supabase
-      .from("friends")
-      .select("*", { count: "exact", head: true })
-      .eq("addressee_id", user.id)
-      .eq("status", "pending");
-    setPendingCount(count || 0);
+    const requests = await friendsApi.listFriendRequests().catch(() => []);
+    setPendingCount(requests.length);
   };
 
   const fetchFriends = async () => {
     if (!user) return;
-    const { data } = await supabase
-      .from("friends")
-      .select("*")
-      .eq("status", "accepted")
-      .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`);
+    const profiles = await friendsApi.listFriends().catch(() => []);
 
-    if (data && data.length > 0) {
-      const friendIds = data.map((f) =>
-        f.requester_id === user.id ? f.addressee_id : f.requester_id
-      );
-      const { data: profiles } = await supabase
-        .from("profiles")
-        .select("user_id, display_name, username, avatar_url, is_online")
-        .in("user_id", friendIds);
-
-      const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
-
+    if (profiles.length > 0) {
       const friendsWithMessages = await Promise.all(
-        friendIds.map(async (id) => {
-          const prof =
-            profileMap.get(id) ||
-            { display_name: null, username: null, avatar_url: null, is_online: null };
+        profiles.map(async (prof) => {
           let lastMessage: string | null = null;
           let lastMessageTime: string | null = null;
           let roomId: string | undefined;
 
           try {
-            const { data: roomData } = await supabase.rpc("get_or_create_dm_room", {
-              user1_id: user.id,
-              user2_id: id,
-            });
-            if (roomData) {
-              roomId = roomData;
-              const { data: msgs } = await supabase
-                .from("messages")
-                .select("content, type, created_at")
-                .eq("room_id", roomData)
-                .order("created_at", { ascending: false })
-                .limit(1);
-              if (msgs && msgs.length > 0) {
-                const msg = msgs[0];
-                lastMessage =
-                  msg.type === "image"
-                    ? "📷 Photo"
-                    : msg.type === "audio"
-                    ? "🎤 Voice note"
-                    : msg.content;
-                lastMessageTime = msg.created_at;
-              }
+            const room = await roomsApi.getOrCreateDmRoom(prof.user_id);
+            roomId = room.id;
+            const msgs = await messagesApi.listMessages(room.id);
+            const msg = msgs[msgs.length - 1];
+            if (msg) {
+              lastMessage =
+                msg.type === "image" ? "📷 Photo" : msg.type === "audio" ? "🎤 Voice note" : msg.content;
+              lastMessageTime = msg.created_at;
             }
           } catch {
             // blocked / error
           }
 
           return {
-            friendId: id,
+            friendId: prof.user_id,
             roomId,
-            profile: prof,
+            profile: { display_name: prof.display_name, username: prof.username, avatar_url: prof.avatar_url, is_online: prof.is_online },
             lastMessage,
             lastMessageTime,
           };
@@ -169,15 +136,12 @@ export default function DMsPage() {
   const startDM = async (friendId: string) => {
     if (!user) return;
     clearDmUnread(friendId);
-    const { data, error } = await supabase.rpc("get_or_create_dm_room", {
-      user1_id: user.id,
-      user2_id: friendId,
-    });
-    if (error) {
+    try {
+      const room = await roomsApi.getOrCreateDmRoom(friendId);
+      navigate(`/room/${room.id}`);
+    } catch {
       toast.error("This private chat isn't available right now");
-      return;
     }
-    navigate(`/room/${data}`);
   };
 
   const formatTime = (iso: string | null) => {

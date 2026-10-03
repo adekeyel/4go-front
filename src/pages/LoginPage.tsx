@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MessageCircle, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
+import axios from "axios";
 import AuthFooterLinks from "@/components/AuthFooterLinks";
 import TickerBanner from "@/components/TickerBanner";
 
@@ -14,17 +15,20 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
+  const { signIn } = useAuth();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      toast.error(error.message);
-    } else {
+    try {
+      await signIn(email.trim().toLowerCase(), password);
       navigate("/");
+    } catch (err) {
+      const message = axios.isAxiosError(err) ? err.response?.data?.error : null;
+      toast.error(message || "Couldn't log in. Check your details and try again.");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (

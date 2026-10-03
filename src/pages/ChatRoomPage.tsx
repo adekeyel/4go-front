@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import axios from "axios";
 import { useAuth } from "@/contexts/AuthContext";
 import { useNotificationContext } from "@/contexts/NotificationContext";
+import { useSocket } from "@/sockets/SocketContext";
+import * as roomsApi from "@/api/rooms";
+import * as messagesApi from "@/api/messages";
+import * as callsApi from "@/api/calls";
+import * as profilesApi from "@/api/profiles";
 import ChatMessage from "@/components/ChatMessage";
 import ChatInput from "@/components/ChatInput";
 import TypingIndicator from "@/components/TypingIndicator";
@@ -13,7 +18,7 @@ import ReportDialog from "@/components/ReportDialog";
 import { useCallContext } from "@/contexts/CallContext";
 import { ArrowLeft, Flag, Phone, Video, ShieldBan, Users, Pin, X } from "lucide-react";
 import { toast } from "sonner";
-import { Tables, TablesInsert } from "@/integrations/supabase/types";
+import { Tables } from "@/integrations/supabase/types";
 import CallLogSystemMessage from "@/components/CallLogSystemMessage";
 import AclibBanner from "@/components/AclibBanner";
 import SponsorFooterBanner from "@/components/monetization/SponsorFooterBanner";
@@ -27,6 +32,7 @@ import {
 import { blockUser, submitModerationReport } from "@/lib/safety";
 import { Textarea } from "@/components/ui/textarea";
 import { canMakeVoiceCall, canMakeVideoCall } from "@/lib/callPermissions";
+import { useMentionRecorder } from "@/hooks/useMentionRecorder";
 
 type Message = Tables<"messages"> & { edited_at?: string | null; reply_to?: string | null };
 type CallLog = Tables<"call_logs">;
@@ -54,12 +60,17 @@ interface ReplyTarget {
 
 const VIDEO_UPLOAD_RANKS = ["Professional", "Expert", "Master"];
 
+function apiErrorMessage(err: unknown, fallback: string) {
+  return (axios.isAxiosError(err) && (err.response?.data as { error?: string })?.error) || fallback;
+}
+
 export default function ChatRoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const targetMessageId = searchParams.get("messageId");
   const handledMessageIdRef = useRef<string | null>(null);
   const { user, profile } = useAuth();
+  const socket = useSocket();
   const { setCurrentRoom, refetchUnreads } = useNotificationContext();
   const [messages, setMessages] = useState<MessageWithProfile[]>([]);
   const [callLogs, setCallLogs] = useState<CallLog[]>([]);
@@ -98,6 +109,7 @@ export default function ChatRoomPage() {
   const canUploadVideo = VIDEO_UPLOAD_RANKS.includes(userRank);
 
   const call = useCallContext();
+  const { recordFromText } = useMentionRecorder();
   const savedLastReadRef = useRef<string | null>(null);
 
   // On enter: fetch last_read_at FIRST, save it, then mark as read
@@ -112,25 +124,19 @@ export default function ChatRoomPage() {
     const init = async () => {
       setCurrentRoom(roomId);
 
-      // 1. Fetch the ORIGINAL last_read_at before marking as read
-      const { data: readData } = await supabase
-        .from("room_reads")
-        .select("last_read_at")
-        .eq("room_id", roomId)
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      const originalLastRead = readData?.last_read_at || null;
+      // 1. Fetch the ORIGINAL last_read_at (and the peer's, for DM ticks) before marking as read.
+      const reads = await roomsApi.listRoomReads(roomId).catch(() => []);
+      const own = reads.find((r) => r.user_id === user.id);
+      const peer = reads.find((r) => r.user_id !== user.id);
+      const originalLastRead = own?.last_read_at || null;
       if (!isActive) return;
 
       savedLastReadRef.current = originalLastRead;
       setLastReadAt(originalLastRead);
+      if (peer) setPeerLastReadAt(peer.last_read_at);
 
       // 2. Now mark as read
-      await supabase.from("room_reads").upsert(
-        { room_id: roomId, user_id: user.id, last_read_at: new Date().toISOString() },
-        { onConflict: "room_id,user_id" }
-      );
+      await roomsApi.markRoomRead(roomId).catch(() => {});
 
       if (!isActive) return;
 
@@ -144,16 +150,13 @@ export default function ChatRoomPage() {
       setCurrentRoom(null);
       // Mark room as read on leave
       if (roomId && user) {
-        supabase.from("room_reads").upsert(
-          { room_id: roomId, user_id: user.id, last_read_at: new Date().toISOString() },
-          { onConflict: "room_id,user_id" }
-        ).then(() => refetchUnreads());
+        roomsApi.markRoomRead(roomId).then(() => refetchUnreads()).catch(() => {});
       }
     };
   }, [roomId, setCurrentRoom, user, refetchUnreads]);
 
   useEffect(() => {
-    if (!roomId || !user) return;
+    if (!roomId || !user || !socket) return;
     void fetchRoom();
     void checkMembership();
     void fetchPinnedMessages();
@@ -161,51 +164,54 @@ export default function ChatRoomPage() {
 
     const refreshInterval = window.setInterval(() => void fetchRoom(), 30000);
 
-    const channel = supabase
-      .channel(`room-${roomId}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `room_id=eq.${roomId}` },
-        async (payload) => {
-          const newMsg = payload.new as Message;
-          const { data: p } = await supabase.from("profiles").select("user_id, display_name, avatar_url, username, rank, is_online, last_seen").eq("user_id", newMsg.sender_id).single();
-          setMessages((prev) => [...prev, { ...newMsg, profile: p || undefined }]);
-        })
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages", filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          const u = payload.new as Message;
-          setMessages((prev) => prev.map((m) => m.id === u.id ? { ...m, ...u } : m));
-        })
-      .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages", filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          const d = payload.old as { id: string };
-          setMessages((prev) => prev.filter((m) => m.id !== d.id));
-        })
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "call_logs", filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          const log = payload.new as CallLog;
-          setCallLogs((prev) => [...prev, log].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()));
-        })
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "call_logs", filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          const log = payload.new as CallLog;
-          setCallLogs((prev) => prev.map((item) => item.id === log.id ? log : item));
-        })
-      .on("postgres_changes", { event: "*", schema: "public", table: "room_reads", filter: `room_id=eq.${roomId}` },
-        (payload) => {
-          // Live read-receipt ticks: only care about the *other* member's read cursor.
-          const row = (payload.new || payload.old) as { user_id: string; last_read_at: string } | null;
-          if (!row || row.user_id === user.id) return;
-          const updated = (payload.new as { last_read_at?: string } | null)?.last_read_at;
-          if (updated) setPeerLastReadAt(updated);
-        })
-      .subscribe();
+    socket.emit("room:join", roomId);
 
-    return () => { window.clearInterval(refreshInterval); supabase.removeChannel(channel); };
-    // Intentionally runs once per roomId/user: fetchRoom/checkMembership/fetchPinnedMessages/
+    const onNewMessage = async (newMsg: Message) => {
+      if (newMsg.room_id !== roomId) return;
+      const profiles = await profilesApi.getProfilesByIds([newMsg.sender_id]).catch(() => []);
+      setMessages((prev) => (prev.some((m) => m.id === newMsg.id) ? prev : [...prev, { ...newMsg, profile: profiles[0] || undefined }]));
+    };
+    const onEditMessage = (u: Message) => {
+      if (u.room_id !== roomId) return;
+      setMessages((prev) => prev.map((m) => (m.id === u.id ? { ...m, ...u } : m)));
+    };
+    const onDeleteMessage = (d: { id: string }) => {
+      setMessages((prev) => prev.filter((m) => m.id !== d.id));
+    };
+    const onCallLog = (log: CallLog) => {
+      if (log.room_id !== roomId) return;
+      setCallLogs((prev) => {
+        const exists = prev.some((c) => c.id === log.id);
+        const next = exists ? prev.map((c) => (c.id === log.id ? log : c)) : [...prev, log];
+        return next.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      });
+    };
+    const onRoomRead = (payload: { roomId: string; userId: string; lastReadAt: string }) => {
+      if (payload.roomId !== roomId || payload.userId === user.id) return;
+      setPeerLastReadAt(payload.lastReadAt);
+    };
+
+    socket.on("message:new", onNewMessage);
+    socket.on("message:edit", onEditMessage);
+    socket.on("message:delete", onDeleteMessage);
+    socket.on("call:log", onCallLog);
+    socket.on("room:read", onRoomRead);
+
+    return () => {
+      window.clearInterval(refreshInterval);
+      socket.emit("room:leave", roomId);
+      socket.off("message:new", onNewMessage);
+      socket.off("message:edit", onEditMessage);
+      socket.off("message:delete", onDeleteMessage);
+      socket.off("call:log", onCallLog);
+      socket.off("room:read", onRoomRead);
+    };
+    // Intentionally runs once per roomId/user/socket: fetchRoom/checkMembership/fetchPinnedMessages/
     // fetchCallLogs are plain (non-memoized) functions defined below and read current
     // roomId/user via closure; including them would cause this effect to tear down and
-    // re-subscribe the realtime channel on every render.
+    // re-join the socket room on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, user]);
+  }, [roomId, user, socket]);
 
   useEffect(() => {
     if (!roomId || !user || readyReadRoomId !== roomId) return;
@@ -221,26 +227,13 @@ export default function ChatRoomPage() {
     if (handledMessageIdRef.current === targetMessageId) return;
     const tryScroll = async () => {
       let exists = messages.some((m) => m.id === targetMessageId);
-      // If not yet loaded (older), fetch from this message forward and replace list
+      // If not yet loaded (older), fetch a window centered on it and replace the list
       if (!exists && roomId) {
-        const { data: target } = await supabase
-          .from("messages")
-          .select("created_at")
-          .eq("id", targetMessageId)
-          .maybeSingle();
-        if (target?.created_at) {
-          const { data: range } = await supabase
-            .from("messages")
-            .select("*")
-            .eq("room_id", roomId)
-            .gte("created_at", target.created_at)
-            .order("created_at", { ascending: true })
-            .limit(50);
-          if (range && range.length) {
-            setMessages(await attachProfiles(range));
-            setHasMore(true);
-            exists = true;
-          }
+        const result = await messagesApi.getMessagesAround(roomId, targetMessageId).catch(() => null);
+        if (result && result.messages.length) {
+          setMessages(await attachProfiles(result.messages));
+          setHasMore(result.hasMoreBefore);
+          exists = true;
         }
       }
       handledMessageIdRef.current = targetMessageId;
@@ -283,73 +276,40 @@ export default function ChatRoomPage() {
 
   const fetchRoom = async () => {
     if (!roomId || !user) return;
-    const { data } = await supabase.from("rooms").select("*").eq("id", roomId).single();
+    const data = await roomsApi.getRoom(roomId).catch(() => null);
     setRoom(data);
-    const { data: members, count } = await supabase.from("room_members").select("user_id, role", { count: "exact" }).eq("room_id", roomId);
-    setMemberCount(count || 0);
-    if (!members || members.length === 0) { setOnlineCount(0); setDmPeer(null); return; }
+    const members = await roomsApi.listRoomMembers(roomId).catch(() => []);
+    setMemberCount(members.length);
+    if (members.length === 0) { setOnlineCount(0); setDmPeer(null); return; }
 
-    const myMembership = members.find((m) => m.user_id === user.id);
-    setIsAdmin(myMembership?.role === "admin");
-
-    const memberIds = members.map((m) => m.user_id);
-    const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, avatar_url, username, rank, is_online, last_seen").in("user_id", memberIds);
-    setOnlineCount(profiles?.filter((p) => p.is_online).length || 0);
+    setOnlineCount(members.filter((m) => m.profile?.is_online).length);
     if (data?.type === "dm") {
-      const peer = (profiles || []).find((p) => p.user_id !== user.id) || null;
-      setDmPeer(peer);
-      // WhatsApp-style read receipts: know when the peer last read this DM so
-      // we can flip our own outgoing ticks from sent -> read.
-      if (peer) {
-        const { data: peerRead } = await supabase
-          .from("room_reads")
-          .select("last_read_at")
-          .eq("room_id", roomId)
-          .eq("user_id", peer.user_id)
-          .maybeSingle();
-        setPeerLastReadAt(peerRead?.last_read_at || null);
-      }
+      const peer = members.find((m) => m.user_id !== user.id)?.profile || null;
+      setDmPeer(peer || null);
     }
-
-    // Check mute status
-    const { data: muteData } = await supabase.from("muted_members").select("id").eq("room_id", roomId).eq("user_id", user.id).maybeSingle();
-    setIsMuted(!!muteData);
   };
 
   const checkMembership = async () => {
     if (!roomId || !user) return;
-    const { data } = await supabase.from("room_members").select("id, role").eq("room_id", roomId).eq("user_id", user.id).maybeSingle();
-    setIsMember(!!data);
-    setIsAdmin(data?.role === "admin");
-
-    if (!data) {
-      const { data: req } = await supabase.from("room_join_requests").select("status").eq("room_id", roomId).eq("user_id", user.id).maybeSingle();
-      setJoinRequestStatus(req?.status || null);
-    }
+    const status = await roomsApi.getRoomMeStatus(roomId).catch(() => null);
+    if (!status) return;
+    setIsMember(status.isMember);
+    setIsAdmin(status.role === "admin");
+    setIsMuted(status.isMuted);
+    if (!status.isMember) setJoinRequestStatus(status.joinRequestStatus);
   };
 
   const fetchPinnedMessages = async () => {
     if (!roomId) return;
-    const { data: pins } = await supabase.from("pinned_messages").select("message_id").eq("room_id", roomId);
-    if (!pins || pins.length === 0) { setPinnedMessages([]); return; }
-    const msgIds = pins.map((p) => p.message_id);
-    const { data: msgs } = await supabase.from("messages").select("*").in("id", msgIds);
-    if (msgs && msgs.length > 0) {
-      const senderIds = [...new Set(msgs.map((m) => m.sender_id))];
-      const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, avatar_url, username, rank").in("user_id", senderIds);
-      const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
-      setPinnedMessages(msgs.map((m) => ({ ...m, profile: profileMap.get(m.sender_id) || undefined })));
-    }
+    const pins = await roomsApi.listPinnedMessages(roomId).catch(() => []);
+    const msgs = (pins as Array<{ message?: Message }>).map((p) => p.message).filter((m): m is Message => Boolean(m));
+    setPinnedMessages(await attachProfiles(msgs));
   };
 
   const fetchCallLogs = async () => {
     if (!roomId) return;
-    const { data } = await supabase
-      .from("call_logs")
-      .select("*")
-      .eq("room_id", roomId)
-      .order("created_at", { ascending: true });
-    setCallLogs(data || []);
+    const data = await callsApi.listCallLogs(roomId).catch(() => []);
+    setCallLogs(data as CallLog[]);
   };
 
   const joinRoom = async () => {
@@ -375,41 +335,32 @@ export default function ChatRoomPage() {
         }
       }
 
-      // Deduct fee immediately
-      if (fee > 0) {
-        const coins = profile?.coins || 0;
-        if (coins < fee) {
-          toast.error(`Not enough coins. You need ${fee} coins to request.`);
-          return;
-        }
-        const { error: deductErr } = await supabase.from("profiles").update({ coins: coins - fee }).eq("user_id", user.id);
-        if (deductErr) { toast.error("Couldn't deduct fee"); return; }
-      }
-
-      const { error } = await supabase.from("room_join_requests").insert({
-        room_id: roomId,
-        user_id: user.id,
-        fee_paid: fee,
-        answers: questions.length > 0 ? joinAnswers : null,
-      });
-      if (error) {
-        // Refund on failure
-        if (fee > 0) {
-          const coins = profile?.coins || 0;
-          await supabase.from("profiles").update({ coins: coins + fee }).eq("user_id", user.id);
-        }
-        if (error.code === "23505") toast.info("Join request already sent");
-        else toast.error("Couldn't send join request");
-      } else {
+      // Fee deduction now happens atomically server-side, inside the same
+      // transaction as creating the request — no separate deduct/refund calls here.
+      try {
+        await roomsApi.submitJoinRequest(roomId, questions.length > 0 ? joinAnswers : undefined);
         setJoinRequestStatus("pending");
         setShowJoinForm(false);
         toast.success(fee > 0 ? `Request sent! ${fee} coins deducted. 🙏` : "Join request sent! Waiting for admin approval. 🙏");
+      } catch (err) {
+        if (axios.isAxiosError(err) && err.response?.status === 409) {
+          toast.info(apiErrorMessage(err, "Join request already sent"));
+        } else {
+          toast.error(apiErrorMessage(err, "Couldn't send join request"));
+        }
       }
       return;
     }
 
-    const { error } = await supabase.from("room_members").insert({ room_id: roomId, user_id: user.id });
-    if (error) { toast.error("Couldn't join room"); } else { setIsMember(true); setMemberCount((c) => c + 1); toast.success("Joined! 🎉"); fetchMessages(); }
+    try {
+      await roomsApi.joinRoom(roomId);
+      setIsMember(true);
+      setMemberCount((c) => c + 1);
+      toast.success("Joined! 🎉");
+      fetchMessages();
+    } catch {
+      toast.error("Couldn't join room");
+    }
   };
 
   const PAGE_SIZE = 50;
@@ -417,8 +368,8 @@ export default function ChatRoomPage() {
   const attachProfiles = async (msgs: Message[]): Promise<MessageWithProfile[]> => {
     if (msgs.length === 0) return [];
     const senderIds = [...new Set(msgs.map((m) => m.sender_id))];
-    const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, avatar_url, username, rank, is_online, last_seen, is_monetized").in("user_id", senderIds);
-    const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
+    const profiles = await profilesApi.getProfilesByIds(senderIds).catch(() => []);
+    const profileMap = new Map(profiles.map((p) => [p.user_id, p]));
     return msgs.map((m) => ({ ...m, profile: profileMap.get(m.sender_id) || undefined }));
   };
 
@@ -426,50 +377,14 @@ export default function ChatRoomPage() {
     if (!roomId || !user) return;
     isInitialLoad.current = true;
 
-    // Use the saved last_read_at from before we marked as read
-    const userLastRead = savedLastReadRef.current;
+    // Jump straight to the first unread message (if any), else load the latest page.
+    const { messages: data, hasMore: more } = await messagesApi
+      .getUnreadMessages(roomId, savedLastReadRef.current)
+      .catch(() => ({ messages: [] as Message[], hasMore: false }));
 
-    if (userLastRead) {
-      const { data: firstUnread } = await supabase
-        .from("messages")
-        .select("id, created_at")
-        .eq("room_id", roomId)
-        .gt("created_at", userLastRead)
-        .neq("sender_id", user.id)
-        .order("created_at", { ascending: true })
-        .limit(1);
-
-      const firstUnreadMessage = Array.isArray(firstUnread)
-        ? firstUnread[0]
-        : firstUnread;
-
-      if (firstUnreadMessage?.created_at) {
-        const [{ data: unreadMessages }, { count: olderCount }] = await Promise.all([
-          supabase
-            .from("messages")
-            .select("*")
-            .eq("room_id", roomId)
-            .gte("created_at", firstUnreadMessage.created_at)
-            .order("created_at", { ascending: true }),
-          supabase
-            .from("messages")
-            .select("id", { count: "exact", head: true })
-            .eq("room_id", roomId)
-            .lt("created_at", firstUnreadMessage.created_at),
-        ]);
-
-        setHasMore((olderCount || 0) > 0);
-        setMessages(await attachProfiles(unreadMessages || []));
-        return;
-      }
-    }
-
-    // Default: load latest PAGE_SIZE messages
-    const { data } = await supabase.from("messages").select("*").eq("room_id", roomId).order("created_at", { ascending: false }).range(0, PAGE_SIZE - 1);
-    if (data && data.length > 0) {
-      const reversed = data.reverse();
-      setHasMore(data.length === PAGE_SIZE);
-      setMessages(await attachProfiles(reversed));
+    if (data.length > 0) {
+      setHasMore(more);
+      setMessages(await attachProfiles(data));
     } else {
       setMessages([]);
       setHasMore(false);
@@ -480,16 +395,9 @@ export default function ChatRoomPage() {
     if (!roomId || loadingMore || !hasMore || messages.length === 0) return;
     setLoadingMore(true);
     const oldestTimestamp = messages[0].created_at;
-    const { data } = await supabase
-      .from("messages")
-      .select("*")
-      .eq("room_id", roomId)
-      .lt("created_at", oldestTimestamp)
-      .order("created_at", { ascending: false })
-      .range(0, PAGE_SIZE - 1);
-    if (data && data.length > 0) {
-      const reversed = data.reverse();
-      const withProfiles = await attachProfiles(reversed);
+    const data = await messagesApi.listMessages(roomId, oldestTimestamp).catch(() => []);
+    if (data.length > 0) {
+      const withProfiles = await attachProfiles(data);
       // Preserve scroll position
       const container = messagesContainerRef.current;
       const prevHeight = container?.scrollHeight || 0;
@@ -521,74 +429,61 @@ export default function ChatRoomPage() {
       toast.error("This is a broadcast-only channel");
       return;
     }
-    const insertData: TablesInsert<"messages"> = {
-      room_id: roomId,
-      sender_id: user.id,
-      type,
-      content: type === "text" ? content : null,
-      media_url: mediaUrl || null,
-      duration: duration || null,
-    };
-    if (replyTo) insertData.reply_to = replyTo;
-    const { data: inserted, error } = await supabase.from("messages").insert(insertData).select("id").maybeSingle();
-    if (error) {
-      console.error("Message insert error:", error);
-      toast.error("Failed to send message: " + error.message);
-      return;
-    }
-    if (type === "text" && content && inserted?.id) {
-      const { extractMentionHandles } = await import("@/lib/mentions");
-      const handles = extractMentionHandles(content);
-      if (handles.length > 0) {
-        const { data: profiles } = await supabase
-          .from("profiles")
-          .select("user_id, username")
-          .in("username", handles);
-        const ids = (profiles || []).map((p) => p.user_id).filter((id): id is string => Boolean(id) && id !== user.id);
-        if (ids.length > 0) {
-          await supabase.rpc("record_mentions", {
-            p_mentioner_id: user.id,
-            p_mentioned_ids: ids,
-            p_source_type: "message",
-            p_source_id: inserted.id,
-            p_context_id: roomId,
-            p_preview: content.slice(0, 200),
-          });
-        }
+    try {
+      const sent = await messagesApi.sendMessage(roomId, {
+        type,
+        content: type === "text" ? content : undefined,
+        media_url: mediaUrl || undefined,
+        duration: duration || undefined,
+        reply_to: replyTo,
+      });
+      if (type === "text" && content) {
+        void recordFromText(content, { sourceType: "message", sourceId: sent.id, contextId: roomId });
       }
+    } catch (err) {
+      console.error("Message send error:", err);
+      toast.error(apiErrorMessage(err, "Failed to send message"));
     }
   };
 
   const editMessage = async (messageId: string, content: string) => {
     if (!user) return;
-    const now = new Date().toISOString();
-    const { error } = await supabase.from("messages").update({ content, edited_at: now }).eq("id", messageId).eq("sender_id", user.id);
-    if (error) { toast.error("Couldn't edit message"); return; }
-    setMessages((c) => c.map((m) => m.id === messageId ? { ...m, content, edited_at: now } : m));
-    toast.success("Message updated");
+    try {
+      const updated = await messagesApi.editMessage(messageId, content);
+      setMessages((c) => c.map((m) => (m.id === messageId ? { ...m, content, edited_at: updated.edited_at } : m)));
+      toast.success("Message updated");
+    } catch {
+      toast.error("Couldn't edit message");
+    }
   };
 
   const deleteMessage = async (messageId: string) => {
     if (!user || !window.confirm("Delete this message?")) return;
-    const { error } = await supabase.from("messages").delete().eq("id", messageId).eq("sender_id", user.id);
-    if (error) { toast.error("Couldn't delete message"); return; }
-    setMessages((c) => c.filter((m) => m.id !== messageId));
-    toast.success("Message deleted");
+    try {
+      await messagesApi.deleteMessage(messageId);
+      setMessages((c) => c.filter((m) => m.id !== messageId));
+      toast.success("Message deleted");
+    } catch {
+      toast.error("Couldn't delete message");
+    }
   };
 
   const handlePinMessage = async (messageId: string) => {
     if (!roomId || !user) return;
     const existing = pinnedMessages.find((m) => m.id === messageId);
-    if (existing) {
-      await supabase.from("pinned_messages").delete().eq("room_id", roomId).eq("message_id", messageId);
-      setPinnedMessages((c) => c.filter((m) => m.id !== messageId));
-      toast.success("Message unpinned");
-    } else {
-      const { error } = await supabase.from("pinned_messages").insert({ room_id: roomId, message_id: messageId, pinned_by: user.id });
-      if (error) { toast.error("Couldn't pin message"); return; }
-      const msg = messages.find((m) => m.id === messageId);
-      if (msg) setPinnedMessages((c) => [...c, msg]);
-      toast.success("Message pinned");
+    try {
+      if (existing) {
+        await roomsApi.unpinMessage(roomId, messageId);
+        setPinnedMessages((c) => c.filter((m) => m.id !== messageId));
+        toast.success("Message unpinned");
+      } else {
+        await roomsApi.pinMessage(roomId, messageId);
+        const msg = messages.find((m) => m.id === messageId);
+        if (msg) setPinnedMessages((c) => [...c, msg]);
+        toast.success("Message pinned");
+      }
+    } catch {
+      toast.error("Couldn't pin message");
     }
   };
 
@@ -601,7 +496,7 @@ export default function ChatRoomPage() {
     });
   };
 
-  // Build a map of reply info, fetching missing originals from DB
+  // Build a map of reply info, fetching missing originals from the API
   const [replyMap, setReplyMap] = useState(new Map<string, { id: string; content: string | null; senderName: string; senderId?: string; type: string }>());
 
   useEffect(() => {
@@ -626,20 +521,14 @@ export default function ChatRoomPage() {
         }
       }
 
-      // Fetch missing reply targets from DB
-      if (missingIds.length > 0) {
+      // Fetch missing reply targets from the API
+      if (missingIds.length > 0 && roomId) {
         const uniqueIds = [...new Set(missingIds)];
-        const { data: missingMsgs } = await supabase
-          .from("messages")
-          .select("id, content, type, sender_id")
-          .in("id", uniqueIds);
-        if (missingMsgs && missingMsgs.length > 0) {
+        const missingMsgs = await messagesApi.getMessagesByIds(roomId, uniqueIds).catch(() => []);
+        if (missingMsgs.length > 0) {
           const senderIds = [...new Set(missingMsgs.map((m) => m.sender_id))];
-          const { data: profiles } = await supabase
-            .from("profiles")
-            .select("user_id, display_name, username")
-            .in("user_id", senderIds);
-          const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
+          const profiles = await profilesApi.getProfilesByIds(senderIds).catch(() => []);
+          const profileMap = new Map(profiles.map((p) => [p.user_id, p]));
 
           for (const msg of messages) {
             if (msg.reply_to && !map.has(msg.id)) {
@@ -663,7 +552,7 @@ export default function ChatRoomPage() {
     };
 
     buildReplyMap();
-  }, [messages]);
+  }, [messages, roomId]);
 
   const handleBlockUser = async (targetUserId: string, name: string) => {
     if (!user || targetUserId === user.id) return;
@@ -800,15 +689,12 @@ export default function ChatRoomPage() {
         ref={messagesContainerRef}
         className="flex-1 overflow-y-auto px-4 py-3"
         onScroll={(e) => {
-          const el = e.currentTarget;
-          if (el.scrollTop < 100 && hasMore && !loadingMore) {
-            loadOlderMessages();
-          }
+          if (e.currentTarget.scrollTop < 100) void loadOlderMessages();
         }}
       >
         {loadingMore && (
           <div className="text-center py-2">
-            <span className="text-xs text-muted-foreground">Loading older messages...</span>
+            <div className="inline-block w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
           </div>
         )}
         {(() => {

@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { NotificationProvider, useNotificationContext } from "@/contexts/NotificationContext";
+import { SocketProvider } from "@/sockets/SocketContext";
 import { CallProvider } from "@/contexts/CallContext";
 import GlobalCallOverlay from "@/components/GlobalCallOverlay";
 import InAppBanner from "@/components/InAppBanner";
@@ -49,6 +50,7 @@ const DailyActivityPage = lazy(() => import("./pages/DailyActivityPage"));
 const InviteContactsPage = lazy(() => import("./pages/InviteContactsPage"));
 const MentionsPage = lazy(() => import("./pages/MentionsPage"));
 const AuthCallbackPage = lazy(() => import("./pages/AuthCallbackPage"));
+const VerifyEmailPage = lazy(() => import("./pages/VerifyEmailPage"));
 const PagesListPage = lazy(() => import("./pages/PagesListPage"));
 const CreatePagePage = lazy(() => import("./pages/CreatePagePage"));
 const PageProfilePage = lazy(() => import("./pages/PageProfilePage"));
@@ -98,7 +100,8 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <AuthProvider>
-          <NotificationProvider>
+          <SocketProvider>
+            <NotificationProvider>
             <CallProvider>
             <GlobalCallOverlay />
             <GlobalBanner />
@@ -110,6 +113,7 @@ const App = () => (
               <Route path="/signup" element={<PublicRoute><SignupPage /></PublicRoute>} />
               <Route path="/forgot-password" element={<PublicRoute><ForgotPasswordPage /></PublicRoute>} />
               <Route path="/reset-password" element={<ResetPasswordPage />} />
+              <Route path="/verify-email" element={<VerifyEmailPage />} />
               <Route path="/auth/callback" element={<AuthCallbackPage />} />
               <Route path="/" element={<HomePage />} />
               <Route path="/setup-profile" element={<ProtectedRoute><SetupProfilePage /></ProtectedRoute>} />
@@ -156,7 +160,8 @@ const App = () => (
             </Routes>
             </Suspense>
             </CallProvider>
-          </NotificationProvider>
+            </NotificationProvider>
+          </SocketProvider>
         </AuthProvider>
       </BrowserRouter>
     </TooltipProvider>
