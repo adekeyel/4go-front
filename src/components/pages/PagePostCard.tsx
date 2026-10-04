@@ -8,6 +8,7 @@ import { renderRichText } from "@/lib/mentions";
 import CommentSheet from "@/components/feed/CommentSheet";
 import SharePostDialog from "@/components/feed/SharePostDialog";
 import ExpandablePostText from "@/components/feed/ExpandablePostText";
+import AdVideoPlayer from "@/components/pages/AdVideoPlayer";
 
 export interface PagePostCardData {
   id: string;
@@ -147,7 +148,7 @@ export default function PagePostCard({ post, onChange }: Props) {
         <img src={post.media_url} alt="" className="w-full max-h-[480px] object-cover" loading="lazy" />
       )}
       {post.media_url && post.media_type === "video" && (
-        <video src={post.media_url} controls controlsList="nodownload" className="w-full max-h-[480px] bg-black" />
+        <AdVideoPlayer postId={post.id} src={post.media_url} className="w-full max-h-[480px] bg-black" />
       )}
 
       <div className="flex items-center justify-between px-3 py-2 text-xs text-muted-foreground">

@@ -164,6 +164,7 @@ export const adminNav: AdminNavGroup[] = [
     items: [
       { id: "ads-advertisers", label: "Advertisers", icon: Building2 },
       { id: "ads-banners", label: "Banner Management", icon: Image },
+      { id: "ads-video", label: "Video Ads", icon: Video },
     ],
   },
   {

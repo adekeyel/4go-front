@@ -100,3 +100,17 @@ export function validateAd(ad: Pick<VideoAdInput, "title" | "video_url" | "place
   }
   return null;
 }
+
+/** What the serve endpoint returns for one ad: only what the player needs. */
+export type ServedAd = Pick<
+  VideoAd,
+  "id" | "video_url" | "thumbnail_url" | "duration_seconds" | "target_url" | "placement" | "mid_roll_at_seconds" | "skippable" | "skip_after_seconds"
+> & {
+  /** Signed by the server; presented back with every event so views/completions/clicks can't be faked. */
+  token: string;
+};
+
+export type AdEventType = "impression" | "completion" | "click";
+
+/** "62%" for part-of-whole, or "—" when there's nothing to divide by yet. */
+export const percent = (part: number, whole: number): string => (whole > 0 ? `${Math.round((part / whole) * 100)}%` : "—");

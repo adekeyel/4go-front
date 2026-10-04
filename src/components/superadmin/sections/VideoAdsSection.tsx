@@ -9,7 +9,7 @@ import VideoAdDialog from "@/components/superadmin/video-ads/VideoAdDialog";
 import {
   apiErrorMessage, deleteVideoAd, listAdvertisers, listVideoAds, updateVideoAd, type AdvertiserOption,
 } from "@/api/videoAds";
-import { describeRule, effectiveStatus, formatClock, type EffectiveStatus, type VideoAd } from "@/lib/videoAds";
+import { describeRule, effectiveStatus, formatClock, percent, type EffectiveStatus, type VideoAd } from "@/lib/videoAds";
 
 const STATUS_BADGE: Record<EffectiveStatus, { label: string; variant: "default" | "secondary" | "outline" }> = {
   live: { label: "Live", variant: "default" },
@@ -91,7 +91,7 @@ export default function VideoAdsSection({ id: _id }: { id: string }) {
     <div className="space-y-4">
       <SectionHeader
         title="Video Ads"
-        subtitle={`${ads.length} ad${ads.length === 1 ? "" : "s"} · play inside user videos longer than their minimum length`}
+        subtitle={`${ads.length} ad${ads.length === 1 ? "" : "s"} · play inside user videos longer than their minimum length · Premium members never see them`}
         action={<Button onClick={openNew}><Plus className="mr-2 h-4 w-4" /> New Video Ad</Button>}
       />
 
@@ -145,8 +145,8 @@ export default function VideoAdsSection({ id: _id }: { id: string }) {
 
                 <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                   <span className="flex items-center gap-1"><Eye className="h-3.5 w-3.5" /> {ad.impressions.toLocaleString()} views</span>
-                  <span className="flex items-center gap-1"><CheckCircle2 className="h-3.5 w-3.5" /> {ad.completions.toLocaleString()} completed</span>
-                  <span className="flex items-center gap-1"><MousePointerClick className="h-3.5 w-3.5" /> {ad.clicks.toLocaleString()} clicks</span>
+                  <span className="flex items-center gap-1"><CheckCircle2 className="h-3.5 w-3.5" /> {ad.completions.toLocaleString()} completed ({percent(ad.completions, ad.impressions)})</span>
+                  <span className="flex items-center gap-1"><MousePointerClick className="h-3.5 w-3.5" /> {ad.clicks.toLocaleString()} clicks ({percent(ad.clicks, ad.impressions)})</span>
                 </div>
 
                 <div className="flex flex-wrap gap-2 pt-1">

@@ -1,6 +1,6 @@
 import axios from "axios";
 import { apiClient } from "@/lib/apiClient";
-import type { VideoAd, VideoAdInput } from "@/lib/videoAds";
+import type { AdEventType, ServedAd, VideoAd, VideoAdInput } from "@/lib/videoAds";
 
 export interface AdUploadResult {
   video_url: string;
@@ -42,4 +42,22 @@ export async function uploadAdVideo(file: File, onProgress?: (percent: number) =
     onUploadProgress: (e) => { if (e.total) onProgress?.(Math.round((e.loaded / e.total) * 100)); },
   });
   return data;
+}
+
+/**
+ * Ads to play inside one page-post video, in playback order. `duration` is the video's real length in
+ * seconds (from the browser once its metadata has loaded). Rejects on failure; the player treats that as
+ * "no ads" so a broken ad service never blocks a video.
+ */
+export async function fetchServedAds(postId: string, duration: number): Promise<ServedAd[]> {
+  const { data } = await apiClient.get<{ ads: ServedAd[] }>("/video-ads/serve", {
+    params: { post_id: postId, duration: Math.round(duration * 100) / 100 },
+    timeout: 8000,
+  });
+  return data.ads ?? [];
+}
+
+/** Tell the server what the viewer saw. Callers ignore failures: a lost count must never affect playback. */
+export async function reportAdEvent(adId: string, postId: string, token: string, type: AdEventType): Promise<void> {
+  await apiClient.post(`/video-ads/${adId}/events`, { type, post_id: postId, token }, { timeout: 5000 });
 }

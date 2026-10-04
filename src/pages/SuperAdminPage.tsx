@@ -33,6 +33,7 @@ import EmployeesAdminSection from "@/components/superadmin/sections/EmployeesAdm
 import ActiveUsersSection from "@/components/superadmin/sections/ActiveUsersSection";
 import EmployeeActivityLogSection from "@/components/superadmin/sections/EmployeeActivityLogSection";
 import AdvertisersSection from "@/components/superadmin/sections/AdvertisersSection";
+import VideoAdsSection from "@/components/superadmin/sections/VideoAdsSection";
 import AdBannersSection from "@/components/superadmin/sections/AdBannersSection";
 import PagesSection from "@/components/superadmin/sections/PagesSection";
 import ChatActivitySection from "@/components/superadmin/sections/ChatActivitySection";
@@ -145,6 +146,7 @@ export default function SuperAdminPage() {
       case "mkt-delivery": return <DeliveryStatusSection id={active} />;
       case "ads-advertisers": return <AdvertisersSection id={active} />;
       case "ads-banners": return <AdBannersSection id={active} />;
+      case "ads-video": return <VideoAdsSection id={active} />;
       case "sup-tickets":
       case "sup-live": return <SupportInboxSection id={active} />;
       case "set-app":
