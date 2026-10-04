@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,9 +42,6 @@ const ACTION_LABELS: Record<string, string> = {
 };
 const actionLabel = (a: string) => ACTION_LABELS[a] ?? a.replace(/_/g, " ");
 
-const rpc = (n: string, a: object) =>
-  (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown; error: { message: string } | null }>).call(supabase, n, a);
-
 export default function EmployeeActivityLogSection({ id }: { id: string }) {
   const [rows, setRows] = useState<LogRow[]>([]);
   const [employees, setEmployees] = useState<EmployeeOpt[]>([]);
@@ -56,22 +54,18 @@ export default function EmployeeActivityLogSection({ id }: { id: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const { data: auth } = await supabase.auth.getUser();
-    const adminId = auth.user?.id ?? null;
-    if (!adminId) { setLoading(false); return; }
-    const [logRes, empRes] = await Promise.all([
-      rpc("admin_employee_activity_log", {
-        p_admin_id: adminId,
-        p_employee: employee === "all" ? null : employee,
-        p_from: from ? new Date(from).toISOString() : null,
-        p_to: to ? new Date(to + "T23:59:59").toISOString() : null,
-        p_limit: 1000,
+    const [logRes, empRes] = await Promise.allSettled([
+      adminApi.listEmployeeActivityLog<LogRow>({
+        ...(employee === "all" ? {} : { employee }),
+        ...(from ? { from: new Date(from).toISOString() } : {}),
+        ...(to ? { to: new Date(to + "T23:59:59").toISOString() } : {}),
+        limit: 1000,
       }),
-      rpc("admin_list_employees", { p_admin_id: adminId }),
+      adminApi.listEmployees<EmployeeOpt>(),
     ]);
-    if (logRes.error) setError(logRes.error.message);
-    setRows((logRes.data as LogRow[]) || []);
-    setEmployees((empRes.data as EmployeeOpt[]) || []);
+    if (logRes.status === "rejected") setError(apiErrorMessage(logRes.reason, "Could not load the activity log"));
+    setRows(logRes.status === "fulfilled" ? logRes.value : []);
+    setEmployees(empRes.status === "fulfilled" ? empRes.value : []);
     setLoading(false);
   }, [employee, from, to]);
 

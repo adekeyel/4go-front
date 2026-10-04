@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -44,13 +45,8 @@ export default function ReportedMediaSection({ id, variant }: { id: string; vari
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data: authData } = await supabase.auth.getUser();
-    const adminId = authData.user?.id;
-    if (!adminId) { setLoading(false); return; }
-    const { data } = await (supabase.rpc as never as (n: string, a: object) => Promise<{ data: ReportedMessage[] | null }>)(
-      "admin_reported_messages", { p_admin_id: adminId, p_types: META[variant].types },
-    );
-    setRows(data || []);
+    const data = await adminApi.listReportedMessages<ReportedMessage>(META[variant].types).catch(() => [] as ReportedMessage[]);
+    setRows(data);
     setLoading(false);
   }, [variant]);
 
@@ -58,9 +54,14 @@ export default function ReportedMediaSection({ id, variant }: { id: string; vari
 
   const setStatus = async (r: ReportedMessage, status: string, msg: string) => {
     setBusy(true);
-    const { error } = await supabase.from("moderation_reports").update({ status } as never).eq("id", r.report_id);
+    try {
+      await adminApi.setReportStatus(r.report_id, status as "resolved" | "dismissed" | "actioned");
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not update the report"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success(msg);
     void load();
   };
@@ -68,10 +69,16 @@ export default function ReportedMediaSection({ id, variant }: { id: string; vari
   const removeMessage = async (r: ReportedMessage) => {
     if (!window.confirm("Permanently remove this content?")) return;
     setBusy(true);
-    const { error } = await supabase.from("messages").delete().eq("id", r.message_id);
-    if (!error) await supabase.from("moderation_reports").update({ status: "resolved" } as never).eq("id", r.report_id);
+    try {
+      await adminApi.adminDeleteMessage(r.message_id);
+      // The report outlives the message, so it can still be marked resolved.
+      await adminApi.setReportStatus(r.report_id, "resolved").catch(() => undefined);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not remove this content"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success("Content removed");
     void load();
   };
@@ -80,11 +87,14 @@ export default function ReportedMediaSection({ id, variant }: { id: string; vari
     const reason = window.prompt("Reason for suspension?", "Reported media violation");
     if (reason === null) return;
     setBusy(true);
-    const { error } = await supabase.from("profiles")
-      .update({ is_suspended: true, suspended_at: new Date().toISOString(), suspended_reason: reason } as never)
-      .eq("user_id", r.sender_id);
+    try {
+      await adminApi.suspendUser(r.sender_id, reason);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not suspend the sender"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success("Sender suspended");
   };
 

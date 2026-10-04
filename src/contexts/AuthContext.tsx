@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState, ReactNode, useCallback 
 import * as authApi from "@/api/auth";
 import { apiClient, setSessionExpiredHandler } from "@/lib/apiClient";
 import { setAccessToken } from "@/lib/tokenStore";
-import { Tables } from "@/integrations/supabase/types";
+import { Tables } from "@/types/database";
 import { usePresence } from "@/hooks/usePresence";
 import { unregisterPushDevice } from "@/lib/pushDevice";
 

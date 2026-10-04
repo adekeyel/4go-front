@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/contexts/AuthContext";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,25 +13,22 @@ import { navItemLabel } from "../adminNav";
 interface App {
   id: string; user_id: string; status: string; created_at: string;
   full_name?: string | null; category?: string | null; type?: string | null;
-  profile?: { display_name: string | null; username: string | null; avatar_url: string | null };
+  profile?: { display_name: string | null; username: string | null; avatar_url: string | null } | null;
 }
 
 export default function VerificationSection({ id }: { id: string }) {
-  const { user } = useAuth();
   const [apps, setApps] = useState<App[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase.from("verification_applications").select("*").order("created_at", { ascending: false }).limit(200);
-    const ids = Array.from(new Set((data || []).map((a) => a.user_id)));
-    const map = new Map<string, { display_name: string | null; username: string | null; avatar_url: string | null }>();
-    if (ids.length) {
-      const { data: profs } = await supabase.from("profiles").select("user_id,display_name,username,avatar_url").in("user_id", ids);
-      (profs || []).forEach((p) => map.set(p.user_id, p));
-    }
-    setApps((data || []).map((a) => ({ ...a, profile: map.get(a.user_id) })));
+    // The backend returns each application with the applicant's profile, at most 100 per request.
+    const first = await adminApi.listVerificationApplications<App>({ limit: 100, offset: 0 }).catch(() => [] as App[]);
+    const more = first.length === 100
+      ? await adminApi.listVerificationApplications<App>({ limit: 100, offset: 100 }).catch(() => [] as App[])
+      : [];
+    setApps([...first, ...more]);
     setLoading(false);
   }, []);
 
@@ -39,11 +36,15 @@ export default function VerificationSection({ id }: { id: string }) {
 
   const review = async (a: App, action: "approve" | "reject") => {
     setBusy(true);
-    const fn: "approve_verification" | "reject_verification" =
-      action === "approve" ? "approve_verification" : "reject_verification";
-    const { error } = await supabase.rpc(fn, { p_admin_id: user!.id, p_application_id: a.id, p_notes: undefined });
+    try {
+      if (action === "approve") await adminApi.approveVerification(a.id);
+      else await adminApi.rejectVerification(a.id);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Failed"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message || "Failed"); return; }
     toast.success(action === "approve" ? "Approved" : "Rejected & refunded");
     void load();
   };

@@ -1,5 +1,5 @@
 import { Phone, PhoneCall, PhoneMissed, PhoneOff, Video } from "lucide-react";
-import { Tables } from "@/integrations/supabase/types";
+import { Tables } from "@/types/database";
 
 type CallLog = Tables<"call_logs">;
 

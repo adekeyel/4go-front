@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
+import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -34,30 +36,34 @@ export default function AdminsSection({ id, users }: { id: string; users: AdminU
   const [admins, setAdmins] = useState<AdminRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const { user: authUser } = useAuth();
   const [me, setMe] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [search, setSearch] = useState("");
   const [newRole, setNewRole] = useState<AdminRoleKey>("moderator");
 
-  // Call as a method on `supabase` so the client keeps its internal `this` binding.
-  const rpc = (n: string, a: object) =>
-    (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown; error: { message: string } | null }>).call(supabase, n, a);
-
   const load = useCallback(async () => {
     setLoading(true);
-    const { data: authData } = await supabase.auth.getUser();
-    const adminId = authData.user?.id ?? null;
-    setMe(adminId);
-    if (!adminId) { setLoading(false); return; }
-    const { data } = await rpc("admin_list_admins", { p_admin_id: adminId });
-    setAdmins((data as AdminRow[]) || []);
+    setMe(authUser?.id ?? null);
+    const rows = await adminApi.listAdmins<AdminRow>().catch(() => [] as AdminRow[]);
+    setAdmins(rows);
     setLoading(false);
-  }, []);
+  }, [authUser?.id]);
 
   useEffect(() => { void load(); }, [load]);
 
+  // Besides the users already loaded, look people up by name on the server so anyone can be found.
+  const [hits, setHits] = useState<AdminUser[]>([]);
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length < 2) { setHits([]); return; }
+    const t = window.setTimeout(() => { adminApi.listUsers<AdminUser>(q).then(setHits).catch(() => setHits([])); }, 300);
+    return () => window.clearTimeout(t);
+  }, [search]);
+
   const adminIds = new Set(admins.map((a) => a.user_id));
-  const candidates = users
+  const pool = [...new Map([...users, ...hits].map((u) => [u.user_id, u])).values()];
+  const candidates = pool
     .filter((u) => !adminIds.has(u.user_id))
     .filter((u) => search.trim()
       ? [u.display_name, u.username, u.user_id].some((f) => f?.toLowerCase().includes(search.toLowerCase().trim()))
@@ -67,9 +73,14 @@ export default function AdminsSection({ id, users }: { id: string; users: AdminU
   const addAdmin = async (target: string) => {
     if (!me) return;
     setBusy(true);
-    const { error } = await rpc("admin_add_admin", { p_admin_id: me, p_target: target, p_role: newRole });
+    try {
+      await adminApi.addAdmin(target, newRole);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not add this admin"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success(`Added as ${ROLE_LABELS[newRole]}`);
     setAdding(false); setSearch("");
     void load();
@@ -79,9 +90,14 @@ export default function AdminsSection({ id, users }: { id: string; users: AdminU
     if (!me) return;
     if (!window.confirm("Remove this super admin?")) return;
     setBusy(true);
-    const { error } = await rpc("admin_remove_admin", { p_admin_id: me, p_target: target });
+    try {
+      await adminApi.removeAdmin(target);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not remove this admin"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success("Admin removed");
     void load();
   };
@@ -89,9 +105,14 @@ export default function AdminsSection({ id, users }: { id: string; users: AdminU
   const changeRole = async (target: string, role: AdminRoleKey) => {
     if (!me) return;
     setBusy(true);
-    const { error } = await rpc("admin_add_admin", { p_admin_id: me, p_target: target, p_role: role });
+    try {
+      await adminApi.addAdmin(target, role);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not change this role"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success(`Role updated to ${ROLE_LABELS[role]}`);
     void load();
   };

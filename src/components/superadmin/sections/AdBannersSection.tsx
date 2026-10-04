@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { uploadFile } from "@/api/uploads";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
@@ -34,7 +36,6 @@ interface Banner {
 
 const STATUSES = ["active", "paused", "ended"];
 const POSITIONS = ["top", "middle", "bottom"];
-const SIGNED_URL_TTL = 60 * 60 * 24 * 365 * 5; // ~5 years
 
 const blank = {
   advertiser_id: "",
@@ -60,11 +61,11 @@ export default function AdBannersSection({ id }: { id: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     const [b, a] = await Promise.all([
-      supabase.from("ad_banners").select("*").order("created_at", { ascending: false }),
-      supabase.from("advertisers").select("id, name").order("name"),
+      adminApi.listAdminBanners<Banner>().catch(() => [] as Banner[]),
+      adminApi.listAdvertisers<Advertiser>().catch(() => [] as Advertiser[]),
     ]);
-    setBanners((b.data || []) as Banner[]);
-    setAdvertisers((a.data || []) as Advertiser[]);
+    setBanners(b);
+    setAdvertisers([...a].sort((x, y) => x.name.localeCompare(y.name)));
     setLoading(false);
   }, []);
 
@@ -104,14 +105,11 @@ export default function AdBannersSection({ id }: { id: string }) {
     if (!user) return;
     setUploading(true);
     try {
-      const ext = file.name.split(".").pop() || "png";
-      const path = `${user.id}/${crypto.randomUUID()}.${ext}`;
-      const up = await supabase.storage.from("ad-banners").upload(path, file, { upsert: false });
-      if (up.error) { toast.error(up.error.message); return; }
-      const { data, error } = await supabase.storage.from("ad-banners").createSignedUrl(path, SIGNED_URL_TTL);
-      if (error || !data) { toast.error(error?.message || "Could not generate image URL"); return; }
-      setForm((f) => ({ ...f, image_url: data.signedUrl }));
+      const { url } = await uploadFile(file, "ad-banners");
+      setForm((f) => ({ ...f, image_url: url }));
       toast.success("Image uploaded");
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not upload the image"));
     } finally {
       setUploading(false);
     }
@@ -133,11 +131,15 @@ export default function AdBannersSection({ id }: { id: string }) {
       position: form.position,
       placements: form.placements,
     };
-    const res = editId
-      ? await supabase.from("ad_banners").update(payload as never).eq("id", editId)
-      : await supabase.from("ad_banners").insert({ ...payload, created_by: user.id } as never);
+    try {
+      if (editId) await adminApi.updateBanner(editId, payload);
+      else await adminApi.createBanner(payload); // the server records who created it
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not save the banner"));
+      return;
+    }
     setBusy(false);
-    if (res.error) { toast.error(res.error.message); return; }
     toast.success(editId ? "Banner updated" : "Banner created");
     setOpen(false);
     void load();
@@ -145,8 +147,12 @@ export default function AdBannersSection({ id }: { id: string }) {
 
   const remove = async (b: Banner) => {
     if (!window.confirm("Delete this banner?")) return;
-    const { error } = await supabase.from("ad_banners").delete().eq("id", b.id);
-    if (error) { toast.error(error.message); return; }
+    try {
+      await adminApi.deleteBanner(b.id);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not delete the banner"));
+      return;
+    }
     toast.success("Banner deleted");
     void load();
   };

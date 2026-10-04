@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { adminDeleteRoom } from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,9 +20,14 @@ export default function ChatsSection({ id, variant, rooms, refresh }: { id: stri
   const remove = async (r: AdminRoom) => {
     if (!window.confirm(`Delete "${r.name || "chat"}" permanently?`)) return;
     setBusy(true);
-    const { error } = await supabase.from("rooms").delete().eq("id", r.id);
+    try {
+      await adminDeleteRoom(r.id);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not delete this chat"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success("Chat deleted");
     refresh();
   };

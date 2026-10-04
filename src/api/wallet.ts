@@ -1,5 +1,5 @@
 import { apiClient } from "@/lib/apiClient";
-import type { Tables } from "@/integrations/supabase/types";
+import type { Tables } from "@/types/database";
 
 export async function listTransactions(): Promise<Tables<"transactions">[]> {
   const { data } = await apiClient.get("/wallet/transactions");

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +43,9 @@ interface Device {
   display_name: string | null;
   username: string | null;
   avatar_url: string | null;
-  endpoint: string;
+  /** The server only sends the push service's hostname, never the full endpoint URL. */
+  endpoint_host: string;
+  endpoint_tail?: string;
   created_at: string;
   updated_at: string | null;
   is_online: boolean | null;
@@ -53,15 +56,13 @@ const EMPTY: Overview = {
   flagged_accounts: 0, pending_withdrawals: 0, large_withdrawals: 0,
 };
 
-function deviceLabel(endpoint: string): string {
-  try {
-    const host = new URL(endpoint).hostname;
-    if (host.includes("apple")) return "Apple (Safari/iOS)";
-    if (host.includes("mozilla")) return "Firefox";
-    if (host.includes("google") || host.includes("fcm")) return "Chrome / Android";
-    if (host.includes("windows") || host.includes("microsoft")) return "Edge / Windows";
-    return host;
-  } catch { return "Unknown device"; }
+function deviceLabel(host: string): string {
+  if (!host) return "Unknown device";
+  if (host.includes("apple")) return "Apple (Safari/iOS)";
+  if (host.includes("mozilla")) return "Firefox";
+  if (host.includes("google") || host.includes("fcm")) return "Chrome / Android";
+  if (host.includes("windows") || host.includes("microsoft")) return "Edge / Windows";
+  return host;
 }
 
 export default function SecuritySection({ id, variant }: { id: string; variant: Variant }) {
@@ -73,19 +74,16 @@ export default function SecuritySection({ id, variant }: { id: string; variant: 
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data: authData } = await supabase.auth.getUser();
-    const adminId = authData.user?.id;
-    if (!adminId) { setLoading(false); return; }
-    const rpc = (n: string, a: object) =>
-      (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown }>).call(supabase, n, a);
+    // The overview and device list are Super Admin only; moderators can still see flagged accounts,
+    // so each call is allowed to fail on its own.
     const [ov, fl, dv] = await Promise.all([
-      rpc("admin_security_overview", { p_admin_id: adminId }),
-      rpc("admin_flagged_accounts", { p_admin_id: adminId }),
-      rpc("admin_devices", { p_admin_id: adminId }),
+      adminApi.getSecurityOverview<Overview>().catch(() => null),
+      adminApi.listFlaggedAccounts<FlaggedAccount>().catch(() => [] as FlaggedAccount[]),
+      adminApi.listDevices<Device>().catch(() => [] as Device[]),
     ]);
-    setOverview((ov.data as Overview) || EMPTY);
-    setFlagged(((fl.data as FlaggedAccount[]) || []).map((f) => ({ ...f, report_count: Number(f.report_count) })));
-    setDevices((dv.data as Device[]) || []);
+    setOverview(ov ?? EMPTY);
+    setFlagged(fl.map((f) => ({ ...f, report_count: Number(f.report_count) })));
+    setDevices(dv);
     setLoading(false);
   }, []);
 
@@ -96,12 +94,15 @@ export default function SecuritySection({ id, variant }: { id: string; variant: 
     const reason = next ? window.prompt("Reason for freezing this account?", "Security risk") : null;
     if (next && reason === null) return;
     setBusy(true);
-    const { error } = await supabase.from("profiles").update(
-      (next ? { is_suspended: true, suspended_at: new Date().toISOString(), suspended_reason: reason }
-            : { is_suspended: false, suspended_at: null, suspended_reason: null }) as never,
-    ).eq("user_id", u.user_id);
+    try {
+      if (next) await adminApi.suspendUser(u.user_id, reason ?? "Security risk");
+      else await adminApi.unsuspendUser(u.user_id);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, next ? "Could not freeze this account" : "Could not unfreeze this account"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success(next ? "Account frozen" : "Account unfrozen");
     void load();
   };
@@ -109,16 +110,21 @@ export default function SecuritySection({ id, variant }: { id: string; variant: 
   const revokeDevice = async (d: Device) => {
     if (!window.confirm("Force logout this device (remove its push session)?")) return;
     setBusy(true);
-    const { error } = await supabase.from("push_subscriptions").delete().eq("id", d.id);
+    try {
+      await adminApi.revokeDevice(d.id);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not revoke this device"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success("Device session revoked");
     void load();
   };
 
   const ipGroups = useMemo(() => {
     const map = new Map<string, number>();
-    devices.forEach((d) => { const l = deviceLabel(d.endpoint); map.set(l, (map.get(l) || 0) + 1); });
+    devices.forEach((d) => { const l = deviceLabel(d.endpoint_host); map.set(l, (map.get(l) || 0) + 1); });
     return Array.from(map.entries()).map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count);
   }, [devices]);
 
@@ -198,7 +204,7 @@ export default function SecuritySection({ id, variant }: { id: string; variant: 
                     <div><p className="font-medium">{d.display_name || "Unnamed"}</p><p className="text-xs text-muted-foreground">@{d.username || "—"}</p></div>
                   </div>
                 </TableCell>
-                <TableCell className="text-sm">{deviceLabel(d.endpoint)}</TableCell>
+                <TableCell className="text-sm">{deviceLabel(d.endpoint_host)}</TableCell>
                 <TableCell className="hidden lg:table-cell text-sm text-muted-foreground">{new Date(d.updated_at || d.created_at).toLocaleString()}</TableCell>
                 <TableCell>{d.is_online ? <Badge className="bg-admin-success text-white hover:bg-admin-success">Online</Badge> : <Badge variant="secondary">Offline</Badge>}</TableCell>
                 <TableCell className="text-right">

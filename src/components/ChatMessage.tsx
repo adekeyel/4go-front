@@ -3,7 +3,7 @@ import { renderRichText } from "@/lib/mentions";
 import SharedPostMessage from "@/components/feed/SharedPostMessage";
 import SharedPagePostMessage from "@/components/feed/SharedPagePostMessage";
 import MessageReactions from "@/components/MessageReactions";
-import { Tables } from "@/integrations/supabase/types";
+import { Tables } from "@/types/database";
 import { recordMessageView, getMessageViewCounts } from "@/api/messages";
 import { useAuth } from "@/contexts/AuthContext";
 import { Check, CheckCheck, CornerUpLeft, Eye, Flag, Gift, Mic, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";

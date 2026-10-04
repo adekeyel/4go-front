@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { listContests } from "@/api/contests";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
@@ -56,8 +58,8 @@ export default function ContestsAdminSection({ id }: { id: string }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase.from("contests").select("*").order("created_at", { ascending: false });
-    setContests((data || []) as Contest[]);
+    const data = await listContests().catch(() => []);
+    setContests(data as unknown as Contest[]);
     setLoading(false);
   }, []);
 
@@ -90,11 +92,15 @@ export default function ContestsAdminSection({ id }: { id: string }) {
       criteria: form.criteria,
       criteria_label: form.criteria_label.trim() || CRITERIA.find((c) => c.id === form.criteria)?.label || null,
     };
-    const res = editId
-      ? await supabase.from("contests").update(payload as never).eq("id", editId)
-      : await supabase.from("contests").insert({ ...payload, created_by: user.id } as never);
+    try {
+      if (editId) await adminApi.updateContest(editId, payload);
+      else await adminApi.createContest(payload); // the server records who created it
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not save the contest"));
+      return;
+    }
     setBusy(false);
-    if (res.error) { toast.error(res.error.message); return; }
     toast.success(editId ? "Contest updated" : "Contest created");
     setOpen(false);
     void load();
@@ -102,8 +108,12 @@ export default function ContestsAdminSection({ id }: { id: string }) {
 
   const remove = async (c: Contest) => {
     if (!window.confirm(`Delete contest "${c.title}"?`)) return;
-    const { error } = await supabase.from("contests").delete().eq("id", c.id);
-    if (error) { toast.error(error.message); return; }
+    try {
+      await adminApi.deleteContest(c.id);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not delete the contest"));
+      return;
+    }
     toast.success("Contest deleted");
     void load();
   };

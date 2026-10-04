@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
+import { useAuth } from "@/contexts/AuthContext";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,9 +72,6 @@ function ActivityBadge({ lastSeen, online }: { lastSeen: string | null; online: 
 
 const fmt = (d: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
 
-const rpc = (n: string, a: object) =>
-  (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown; error: { message: string } | null }>).call(supabase, n, a);
-
 export default function EmployeeDashboardSection({
   employeeId,
   title,
@@ -82,6 +81,8 @@ export default function EmployeeDashboardSection({
   title?: string;
   subtitle?: string;
 }) {
+  const { user } = useAuth();
+  const callerId = user?.id ?? null;
   const [stats, setStats] = useState<Stats | null>(null);
   const [invited, setInvited] = useState<Invited[]>([]);
   const [downline, setDownline] = useState<Downline[]>([]);
@@ -93,24 +94,21 @@ export default function EmployeeDashboardSection({
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const { data: auth } = await supabase.auth.getUser();
-    const caller = auth.user?.id ?? null;
-    if (!caller) { setLoading(false); return; }
-    const [s, i, d] = await Promise.all([
-      rpc("employee_pipeline_stats", { p_caller: caller, p_employee: employeeId }),
-      rpc("employee_invited_users", { p_caller: caller, p_employee: employeeId }),
-      rpc("employee_downline", { p_caller: caller, p_employee: employeeId }),
+    const [s, i, d] = await Promise.allSettled([
+      adminApi.getEmployeePipeline<Stats>(employeeId),
+      adminApi.listEmployeeInvited<Invited>(employeeId),
+      adminApi.listEmployeeDownline<Downline>(employeeId),
     ]);
-    if (s.error) setError(s.error.message);
-    setStats((s.data as Stats) ?? null);
-    setInvited((i.data as Invited[]) ?? []);
-    setDownline((d.data as Downline[]) ?? []);
+    if (s.status === "rejected") setError(apiErrorMessage(s.reason, "Could not load this pipeline"));
+    setStats(s.status === "fulfilled" ? s.value : null);
+    setInvited(i.status === "fulfilled" ? i.value : []);
+    setDownline(d.status === "fulfilled" ? d.value : []);
     setLoading(false);
     // Only record when an employee is viewing their OWN pipeline.
-    if (caller === employeeId) {
-      void rpc("log_employee_activity", { p_employee: caller, p_action: "viewed_dashboard", p_detail: "Viewed own pipeline", p_meta: {} });
+    if (callerId && callerId === employeeId) {
+      void adminApi.logEmployeeActivity("viewed_dashboard", "Viewed own pipeline").catch(() => undefined);
     }
-  }, [employeeId]);
+  }, [employeeId, callerId]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -161,10 +159,8 @@ export default function EmployeeDashboardSection({
   };
 
   const logExport = async (kind: string) => {
-    const { data: auth } = await supabase.auth.getUser();
-    const caller = auth.user?.id;
-    if (caller && caller === employeeId) {
-      void rpc("log_employee_activity", { p_employee: caller, p_action: "exported_csv", p_detail: `Exported ${kind}`, p_meta: {} });
+    if (callerId && callerId === employeeId) {
+      void adminApi.logEmployeeActivity("exported_csv", `Exported ${kind}`).catch(() => undefined);
     }
   };
 

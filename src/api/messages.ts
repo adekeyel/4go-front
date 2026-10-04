@@ -1,5 +1,5 @@
 import { apiClient } from "@/lib/apiClient";
-import type { Tables } from "@/integrations/supabase/types";
+import type { Tables } from "@/types/database";
 
 // Some columns (edited_at, reply_to) may be newer than the generated
 // Supabase types snapshot — declared explicitly here, same as ChatRoomPage.

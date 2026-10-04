@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,9 +29,6 @@ interface Employee {
 type SortKey = "name" | "total_invited" | "active_7" | "active_30" | "employee_since";
 const PAGE_SIZE = 10;
 
-const rpc = (n: string, a: object) =>
-  (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown; error: { message: string } | null }>).call(supabase, n, a);
-
 export default function EmployeesAdminSection({ id }: { id: string }) {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
@@ -44,12 +42,12 @@ export default function EmployeesAdminSection({ id }: { id: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const { data: auth } = await supabase.auth.getUser();
-    const adminId = auth.user?.id ?? null;
-    if (!adminId) { setLoading(false); return; }
-    const { data, error } = await rpc("admin_list_employees", { p_admin_id: adminId });
-    if (error) setError(error.message);
-    setEmployees((data as Employee[]) || []);
+    try {
+      setEmployees(await adminApi.listEmployees<Employee>());
+    } catch (e) {
+      setError(apiErrorMessage(e, "Could not load employees"));
+      setEmployees([]);
+    }
     setLoading(false);
   }, []);
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/contexts/AuthContext";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,6 @@ function CharCount({ value }: { value: string }) {
 }
 
 export default function BroadcastSection({ id }: { id: string }) {
-  const { user } = useAuth();
   const [inTitle, setInTitle] = useState("");
   const [inMsg, setInMsg] = useState("");
   const [priority, setPriority] = useState("normal");
@@ -30,51 +29,51 @@ export default function BroadcastSection({ id }: { id: string }) {
   const sendInApp = async () => {
     if (!inTitle.trim() || !inMsg.trim()) { toast.error("Title and message required"); return; }
     setBusy("announce");
-    const { data, error } = await supabase.functions.invoke("admin-broadcast", {
-      body: { mode: "announce", title: inTitle.trim(), message: inMsg.trim(), priority },
-    });
+    let recipients: number | undefined;
+    try {
+      // The backend's priority levels are low / normal / high / urgent; the "Important" option maps to high.
+      const res = await adminApi.sendAnnouncement(inTitle.trim(), inMsg.trim(), priority === "important" ? "high" : "normal");
+      recipients = res.recipients;
+    } catch (e) {
+      setBusy(null);
+      toast.error(apiErrorMessage(e, "Failed to send"));
+      return;
+    }
     setBusy(null);
-    if (error) { toast.error(error.message || "Failed to send"); return; }
-    toast.success(`Announcement delivered to ${(data as { recipients?: number })?.recipients ?? "all"} users`);
+    toast.success(`Announcement delivered to ${recipients ?? "all"} users`);
     setInTitle(""); setInMsg("");
   };
 
   const sendPush = async () => {
     if (!pushTitle.trim() || !pushBody.trim()) { toast.error("Title and message required"); return; }
     setBusy("push");
-    const { data: subs } = await supabase.from("push_subscriptions").select("user_id");
-    const ids = Array.from(new Set((subs || []).map((s: { user_id: string }) => s.user_id)));
-    // Also store in the notification center so it shows in the bell.
-    await supabase.from("global_notifications").insert({
-      title: pushTitle.trim(), message: pushBody.trim(), priority: "normal", sent_by: user!.id,
-    } as never);
-    if (ids.length) {
-      const { data: res } = await supabase.functions.invoke("send-push", { body: { user_ids: ids, title: pushTitle.trim(), body: pushBody.trim() } });
-      const sent = (res as { sent?: number })?.sent ?? 0;
-      const total = (res as { total?: number })?.total ?? ids.length;
-      await supabase.from("broadcast_deliveries").insert({
-        channel: "push", title: pushTitle.trim(), body: pushBody.trim(), sent_by: user!.id,
-        target_count: total, success_count: sent, failure_count: Math.max(0, total - sent),
-      } as never);
+    try {
+      // The server collects the subscribers, sends in the background and records the delivery.
+      const { recipients } = await adminApi.sendPushBroadcast(pushTitle.trim(), pushBody.trim());
       setBusy(null);
-      toast.success(`Push sent to ${sent}/${total} subscribers`);
-    } else {
+      if (recipients > 0) toast.success(`Push on its way to ${recipients} subscribers`);
+      else toast.error("No push subscribers found");
+      setPushTitle(""); setPushBody("");
+    } catch (e) {
       setBusy(null);
-      toast.error("No push subscribers found");
+      toast.error(apiErrorMessage(e, "Failed to send"));
     }
-    setPushTitle(""); setPushBody("");
   };
 
   const sendEmail = async () => {
     if (!emailSubject.trim() || !emailBody.trim()) { toast.error("Subject and message required"); return; }
     if (!window.confirm("Send this email to every registered user?")) return;
     setBusy("email");
-    const { data, error } = await supabase.functions.invoke("admin-broadcast", {
-      body: { mode: "email", subject: emailSubject.trim(), message: emailBody.trim() },
-    });
+    let recipients: number | undefined;
+    try {
+      recipients = (await adminApi.sendEmailBroadcast(emailSubject.trim(), emailBody.trim())).recipients;
+    } catch (e) {
+      setBusy(null);
+      toast.error(apiErrorMessage(e, "Failed to send"));
+      return;
+    }
     setBusy(null);
-    if (error) { toast.error(error.message || "Failed to send"); return; }
-    toast.success(`Email queued for ${(data as { recipients?: number })?.recipients ?? "all"} users`);
+    toast.success(`Email queued for ${recipients ?? "all"} users`);
     setEmailSubject(""); setEmailBody("");
   };
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
 
 export interface DailyMetric {
   day: string;
@@ -21,23 +21,19 @@ export function useAnalyticsData(days = 14) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data: authData } = await supabase.auth.getUser();
-    const adminId = authData.user?.id;
-    if (!adminId) { setLoading(false); return; }
-
-    const [dailyRes, typesRes] = await Promise.all([
-      supabase.rpc("admin_daily_metrics", { p_admin_id: adminId, p_days: days }),
-      supabase.rpc("admin_message_type_breakdown", { p_admin_id: adminId }),
+    const [dailyRows, typeRows] = await Promise.all([
+      adminApi.getDailyMetrics<DailyMetric>(days).catch(() => [] as DailyMetric[]),
+      adminApi.getMessageTypeBreakdown<TypeBreakdown>().catch(() => [] as TypeBreakdown[]),
     ]);
 
-    setDaily(((dailyRes?.data as DailyMetric[]) || []).map((d) => ({
+    setDaily(dailyRows.map((d) => ({
       ...d,
       new_users: Number(d.new_users),
       messages: Number(d.messages),
       active_users: Number(d.active_users),
       new_subs: Number(d.new_subs),
     })));
-    setTypes(((typesRes?.data as TypeBreakdown[]) || []).map((t) => ({ type: t.type, count: Number(t.count) })));
+    setTypes(typeRows.map((t) => ({ type: t.type, count: Number(t.count) })));
     setLoading(false);
   }, [days]);
 

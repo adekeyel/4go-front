@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Mail, Bell, Speaker, CheckCircle2, XCircle, Clock, RefreshCw } from "lucide-react";
 import { SectionHeader, StatTile } from "./primitives";
 
-interface EmailRow { message_id: string; recipient_email: string; status: string; error_message: string | null; created_at: string; }
+interface EmailRow { message_id: string; template_name?: string; recipient_email: string; status: string; error_message: string | null; created_at: string; }
 interface Delivery { id: string; channel: string; title: string | null; body: string | null; target_count: number; success_count: number; failure_count: number; error_sample: string | null; created_at: string; }
 
 const RANGES = [
@@ -39,25 +39,28 @@ export default function DeliveryStatusSection({ id }: { id: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
-    const [statRes, logRes, delRes] = await Promise.all([
-      supabase.rpc("admin_email_campaign_stats", { p_since: since }),
-      supabase.from("email_send_log").select("message_id,recipient_email,status,error_message,created_at")
-        .eq("template_name", "admin_broadcast").gte("created_at", since).order("created_at", { ascending: false }).limit(400),
-      supabase.from("broadcast_deliveries").select("*").gte("created_at", since).order("created_at", { ascending: false }).limit(100),
+    const [statRes, logRows, delRows] = await Promise.all([
+      adminApi.getEmailCampaignStats(Math.max(1, Math.ceil(hours / 24))).catch(() => null),
+      adminApi.listEmailLog<EmailRow>({ since, template: "admin_broadcast", limit: 1000 }).catch(() => [] as EmailRow[]),
+      adminApi.listBroadcastDeliveries<Delivery>(since).catch(() => [] as Delivery[]),
     ]);
     const s: Record<string, number> = {};
-    for (const r of (statRes.data as { status: string; count: number }[] | null) ?? []) s[r.status] = Number(r.count);
+    for (const r of statRes?.stats ?? []) s[r.status] = Number(r.count);
+    // Emails still waiting in the send queue count as pending too.
+    if (statRes?.waiting) s.pending = (s.pending ?? 0) + statRes.waiting;
     setStats(s);
     // Dedupe email log by message_id keeping latest (already ordered desc)
     const seen = new Set<string>();
     const deduped: EmailRow[] = [];
-    for (const r of (logRes.data as EmailRow[] | null) ?? []) {
+    for (const r of logRows) {
+      if (r.template_name && r.template_name !== "admin_broadcast") continue;
       if (seen.has(r.message_id)) continue;
       seen.add(r.message_id);
       deduped.push(r);
+      if (deduped.length >= 400) break;
     }
     setRows(deduped);
-    setDeliveries((delRes.data as Delivery[] | null) ?? []);
+    setDeliveries(delRows.slice(0, 100));
     setLoading(false);
   }, [hours]);
 

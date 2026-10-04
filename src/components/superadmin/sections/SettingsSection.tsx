@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -34,8 +35,7 @@ export default function SettingsSection({ id }: { id: string }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase.from("app_settings").select("key,value,label,category").eq("category", category).order("key");
-    const rows = (data as Setting[]) || [];
+    const rows = (await adminApi.listSettings(category).catch(() => [])) as Setting[];
     setSettings(rows);
     setDraft(Object.fromEntries(rows.map((r) => [r.key, r.value])));
     setLoading(false);
@@ -50,13 +50,17 @@ export default function SettingsSection({ id }: { id: string }) {
 
   const save = async () => {
     setBusy(true);
-    const { data: authData } = await supabase.auth.getUser();
     const updates = settings
       .filter((s) => JSON.stringify(s.value) !== JSON.stringify(draft[s.key]))
-      .map((s) => supabase.from("app_settings").update({ value: draft[s.key] as never, updated_by: authData.user?.id } as never).eq("key", s.key));
-    const results = await Promise.all(updates);
+      .map((s) => ({ key: s.key, value: draft[s.key] }));
+    try {
+      await adminApi.saveSettings(updates); // one request; the server applies all of it or none of it
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Failed to save settings"));
+      return;
+    }
     setBusy(false);
-    if (results.some((r) => r.error)) { toast.error("Failed to save some settings"); return; }
     toast.success("Settings saved");
     void load();
   };

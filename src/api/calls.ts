@@ -1,5 +1,5 @@
 import { apiClient } from "@/lib/apiClient";
-import type { Tables } from "@/integrations/supabase/types";
+import type { Tables } from "@/types/database";
 
 export type CallLog = Tables<"call_logs">;
 export type CallType = "voice" | "video";

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,9 +40,6 @@ const WINDOWS: { key: keyof Windows; label: string; days: number; icon: typeof U
 const PAGE_SIZE = 20;
 type SortKey = "name" | "last_seen";
 
-const rpc = (n: string, a: object) =>
-  (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown; error: { message: string } | null }>).call(supabase, n, a);
-
 export default function ActiveUsersSection({ id }: { id: string }) {
   const [data, setData] = useState<Windows | null>(null);
   const [loading, setLoading] = useState(true);
@@ -58,12 +56,12 @@ export default function ActiveUsersSection({ id }: { id: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const { data: auth } = await supabase.auth.getUser();
-    const adminId = auth.user?.id ?? null;
-    if (!adminId) { setLoading(false); return; }
-    const { data: res, error } = await rpc("admin_active_users_windows", { p_admin_id: adminId });
-    if (error) setError(error.message);
-    setData((res as Windows) ?? null);
+    try {
+      setData(await adminApi.getActiveWindows<Windows>());
+    } catch (e) {
+      setError(apiErrorMessage(e, "Could not load active users"));
+      setData(null);
+    }
     setLoading(false);
   }, []);
 
@@ -76,12 +74,12 @@ export default function ActiveUsersSection({ id }: { id: string }) {
     setList([]);
     setSearch("");
     setPage(0);
-    const { data: auth } = await supabase.auth.getUser();
-    const adminId = auth.user?.id ?? null;
-    if (!adminId) { setListLoading(false); return; }
-    const { data: res, error } = await rpc("admin_active_users_list", { p_admin_id: adminId, p_days: days });
-    if (error) setError(error.message);
-    setList((res as ActiveUser[]) ?? []);
+    try {
+      setList(await adminApi.listActiveUsers<ActiveUser>(days));
+    } catch (e) {
+      setError(apiErrorMessage(e, "Could not load the user list"));
+      setList([]);
+    }
     setListLoading(false);
   }, []);
 

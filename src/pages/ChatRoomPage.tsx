@@ -18,7 +18,7 @@ import ReportDialog from "@/components/ReportDialog";
 import { useCallContext } from "@/contexts/CallContext";
 import { ArrowLeft, Flag, Phone, Video, ShieldBan, Users, Pin, X } from "lucide-react";
 import { toast } from "sonner";
-import { Tables } from "@/integrations/supabase/types";
+import { Tables } from "@/types/database";
 import CallLogSystemMessage from "@/components/CallLogSystemMessage";
 import AclibBanner from "@/components/AclibBanner";
 import SponsorFooterBanner from "@/components/monetization/SponsorFooterBanner";

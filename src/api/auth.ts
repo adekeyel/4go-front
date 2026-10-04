@@ -1,6 +1,6 @@
 import { apiClient } from "@/lib/apiClient";
 import { setAccessToken } from "@/lib/tokenStore";
-import type { Tables } from "@/integrations/supabase/types";
+import type { Tables } from "@/types/database";
 
 type Profile = Tables<"profiles">;
 

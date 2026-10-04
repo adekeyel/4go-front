@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import * as adminApi from "@/api/admin";
 
 export interface AdminUser {
   user_id: string;
@@ -45,7 +45,9 @@ export interface AdminRoom {
   name: string;
   type: string;
   is_active: boolean | null;
-  max_members: number | null;
+  max_members?: number | null;
+  member_count?: number;
+  message_count?: number;
   created_at: string;
 }
 
@@ -88,7 +90,7 @@ const EMPTY_STATS: PlatformStats = {
   active_subs: 0, mrr: 0, pending_withdrawals: 0,
 };
 
-export function useAdminData() {
+export function useAdminData(search = "") {
   const [loading, setLoading] = useState(true);
   const [kpis, setKpis] = useState<Kpis>({
     totalUsers: 0, activeToday: 0, onlineUsers: 0, messagesToday: 0,
@@ -99,29 +101,43 @@ export function useAdminData() {
   const [reports, setReports] = useState<AdminReport[]>([]);
   const [subscriptions, setSubscriptions] = useState<AdminSub[]>([]);
   const [rooms, setRooms] = useState<AdminRoom[]>([]);
+  const searchRef = useRef(search);
+  searchRef.current = search;
+  const mounted = useRef(false);
+
+  // Each call is allowed to fail on its own: the backend limits some of these to certain staff roles
+  // (e.g. subscriptions are Super Admin only), and a 403 should leave that panel empty, not break the page.
+  const loadUsers = useCallback(async (q: string) => {
+    const base = await adminApi.listUsers<AdminUser>(undefined, 1000).catch(() => [] as AdminUser[]);
+    // Also search by name on the server so people outside the newest batch can still be found.
+    const found = q.trim() ? await adminApi.listUsers<AdminUser>(q.trim(), 1000).catch(() => [] as AdminUser[]) : [];
+    const seen = new Set<string>();
+    const merged: AdminUser[] = [];
+    for (const u of [...base, ...found]) {
+      if (seen.has(u.user_id)) continue;
+      seen.add(u.user_id);
+      // Moderators and support staff get a trimmed profile (no phone number or coins).
+      merged.push({ ...u, phone_number: u.phone_number ?? null, coins: u.coins ?? 0, rank: u.rank ?? "" });
+    }
+    return merged;
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data: authData } = await supabase.auth.getUser();
-    const adminId = authData.user?.id;
-
-    const [usersRes, reportsRes, subsRes, roomsRes, statsRes] = await Promise.all([
-      supabase.from("profiles").select("user_id,display_name,username,avatar_url,phone_number,rank,coins,is_online,is_premium,is_verified,is_suspended,is_monetized,last_seen,created_at").order("created_at", { ascending: false }).limit(1000),
-      supabase.from("moderation_reports").select("*").order("created_at", { ascending: false }).limit(300),
-      supabase.from("subscriptions").select("id,user_id,plan,status,amount_ngn,current_period_end,created_at").order("created_at", { ascending: false }).limit(500),
-      supabase.from("rooms").select("id,name,type,is_active,max_members,created_at").order("created_at", { ascending: false }).limit(500),
-      adminId
-        ? supabase.rpc("admin_platform_stats", { p_admin_id: adminId })
-        : Promise.resolve({ data: null }),
+    const [users, reports, subs, rooms, statsRes] = await Promise.all([
+      loadUsers(searchRef.current),
+      adminApi.listReports<AdminReport>().catch(() => [] as AdminReport[]),
+      adminApi.listSubscriptions<AdminSub>({ limit: 500 }).catch(() => [] as AdminSub[]),
+      adminApi.listAdminRooms<AdminRoom>().catch(() => [] as AdminRoom[]),
+      adminApi.getPlatformStats<PlatformStats>().catch(() => null),
     ]);
 
-    const subs = (subsRes.data || []) as AdminSub[];
-    const s = (statsRes?.data as PlatformStats | null) || EMPTY_STATS;
+    const s = statsRes || EMPTY_STATS;
 
-    setUsers((usersRes.data || []) as AdminUser[]);
-    setReports((reportsRes.data || []) as AdminReport[]);
+    setUsers(users);
+    setReports(reports);
     setSubscriptions(subs);
-    setRooms((roomsRes.data || []) as AdminRoom[]);
+    setRooms(rooms);
     setStats(s);
     setKpis({
       totalUsers: s.total_users,
@@ -134,9 +150,16 @@ export function useAdminData() {
       revenue: Number(s.total_revenue) || 0,
     });
     setLoading(false);
-  }, []);
+  }, [loadUsers]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Typing in the top search box only re-queries users (after a short pause), not everything.
+  useEffect(() => {
+    if (!mounted.current) { mounted.current = true; return; }
+    const t = window.setTimeout(() => { void loadUsers(search).then(setUsers); }, 300);
+    return () => window.clearTimeout(t);
+  }, [search, loadUsers]);
 
   return { loading, kpis, stats, users, reports, subscriptions, rooms, refresh: load, setUsers, setReports };
 }

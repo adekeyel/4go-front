@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -9,7 +10,6 @@ import { AdminSub } from "../useAdminData";
 import { SectionHeader, StatTile } from "./primitives";
 import { navItemLabel } from "../adminNav";
 import { Banknote, Tag, Users, Undo2, Repeat, Check, X, Send } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
 
 interface Withdrawal {
   id: string; user_id: string; amount: number; naira_amount: number;
@@ -19,15 +19,14 @@ interface Withdrawal {
 type Variant = "payments" | "plans" | "refunds";
 
 export default function PaymentsSection({ id, variant, subscriptions }: { id: string; variant: Variant; subscriptions: AdminSub[] }) {
-  const { user } = useAuth();
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
   const [loading, setLoading] = useState(variant === "refunds");
   const [actingId, setActingId] = useState<string | null>(null);
 
   const loadWithdrawals = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase.from("withdrawals").select("id,user_id,amount,naira_amount,status,account_name,bank_code,created_at").order("created_at", { ascending: false }).limit(200);
-    setWithdrawals((data || []) as Withdrawal[]);
+    const data = await adminApi.listAllWithdrawals<Withdrawal>(200).catch(() => [] as Withdrawal[]);
+    setWithdrawals(data);
     setLoading(false);
   }, []);
 
@@ -35,35 +34,42 @@ export default function PaymentsSection({ id, variant, subscriptions }: { id: st
 
   const approveAndPay = async (w: Withdrawal) => {
     setActingId(w.id);
-    const { data, error } = await supabase.functions.invoke("process-withdrawal", { body: { withdrawalId: w.id } });
-    setActingId(null);
-    if (error || (data && (data as { success?: boolean }).success === false)) {
-      toast.error((data as { error?: string })?.error || error?.message || "Payout failed");
-      void loadWithdrawals();
-      return;
+    try {
+      await adminApi.processPayout(w.id);
+      toast.success("Payout initiated");
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Payout failed"));
     }
-    toast.success("Payout initiated");
+    setActingId(null);
     void loadWithdrawals();
   };
 
   const markPaid = async (w: Withdrawal) => {
-    if (!user) return;
     if (!window.confirm(`Mark ₦${Number(w.naira_amount).toLocaleString()} to ${w.account_name} as paid?`)) return;
     setActingId(w.id);
-    const { error } = await supabase.rpc("admin_complete_withdrawal", { p_admin_id: user.id, p_withdrawal_id: w.id });
+    try {
+      await adminApi.completePayout(w.id);
+    } catch (e) {
+      setActingId(null);
+      toast.error(apiErrorMessage(e, "Could not mark this withdrawal as paid"));
+      return;
+    }
     setActingId(null);
-    if (error) { toast.error(error.message); return; }
     toast.success("Marked as paid");
     void loadWithdrawals();
   };
 
   const rejectWithdrawal = async (w: Withdrawal) => {
-    if (!user) return;
     if (!window.confirm("Reject this withdrawal and refund the member's coins?")) return;
     setActingId(w.id);
-    const { error } = await supabase.rpc("admin_reject_withdrawal", { p_admin_id: user.id, p_withdrawal_id: w.id });
+    try {
+      await adminApi.rejectWithdrawal(w.id);
+    } catch (e) {
+      setActingId(null);
+      toast.error(apiErrorMessage(e, "Could not reject this withdrawal"));
+      return;
+    }
     setActingId(null);
-    if (error) { toast.error(error.message); return; }
     toast.success("Withdrawal rejected & coins refunded");
     void loadWithdrawals();
   };

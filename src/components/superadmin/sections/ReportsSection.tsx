@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,9 +19,14 @@ export default function ReportsSection({ id, reports, refresh }: { id: string; r
 
   const setStatus = async (r: AdminReport, status: string) => {
     setBusy(true);
-    const { error } = await supabase.from("moderation_reports").update({ status }).eq("id", r.id);
+    try {
+      await adminApi.setReportStatus(r.id, status as "resolved" | "dismissed" | "actioned");
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not update the report"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success(`Report ${status}`);
     refresh();
   };
@@ -28,7 +34,13 @@ export default function ReportsSection({ id, reports, refresh }: { id: string; r
   const suspendReported = async (r: AdminReport) => {
     if (!r.target_user_id) { toast.error("No target user on this report"); return; }
     setBusy(true);
-    await supabase.from("profiles").update({ is_suspended: true, suspended_at: new Date().toISOString(), suspended_reason: `Report: ${r.reason}` } as never).eq("user_id", r.target_user_id);
+    try {
+      await adminApi.suspendUser(r.target_user_id, `Report: ${r.reason}`);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not suspend this user"));
+      return;
+    }
     setBusy(false);
     toast.success("Reported user suspended");
     void setStatus(r, "actioned");
@@ -37,7 +49,13 @@ export default function ReportsSection({ id, reports, refresh }: { id: string; r
   const removeContent = async (r: AdminReport) => {
     if (!r.target_message_id) { toast.error("No message attached"); return; }
     setBusy(true);
-    await supabase.from("messages").delete().eq("id", r.target_message_id);
+    try {
+      await adminApi.adminDeleteMessage(r.target_message_id);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not remove this message"));
+      return;
+    }
     setBusy(false);
     toast.success("Content removed");
     void setStatus(r, "actioned");

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -45,24 +45,18 @@ export default function AuditLogSection({ id }: { id: string }) {
   const [search, setSearch] = useState("");
   const [actionFilter, setActionFilter] = useState("all");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    const { data } = await supabase
-      .from("admin_audit_logs")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(500);
-    setRows((data || []) as AuditRow[]);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    const data = await adminApi.listAuditLogs<AuditRow>({ limit: 300 }).catch(() => null);
+    if (data) setRows(data);
     setLoading(false);
   }, []);
 
+  // The backend has no live feed for the audit trail, so check again every 30 seconds while the tab is open.
   useEffect(() => {
     void load();
-    const ch = supabase
-      .channel("admin-audit")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "admin_audit_logs" }, () => void load())
-      .subscribe();
-    return () => { void supabase.removeChannel(ch); };
+    const timer = window.setInterval(() => { if (!document.hidden) void load(true); }, 30_000);
+    return () => window.clearInterval(timer);
   }, [load]);
 
   const actions = useMemo(() => [...new Set(rows.map((r) => r.action))].sort(), [rows]);

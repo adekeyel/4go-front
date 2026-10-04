@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ShieldX, LayoutDashboard, Users, Flag, Banknote, Megaphone, MessageSquare } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { getMyAdminRole } from "@/api/admin";
 import { useAuth } from "@/contexts/AuthContext";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
@@ -56,12 +56,12 @@ export default function SuperAdminPage() {
   const [role, setRole] = useState<AdminRoleKey | null | undefined>(undefined);
   const [active, setActive] = useState("overview");
   const [search, setSearch] = useState("");
-  const data = useAdminData();
+  const data = useAdminData(search);
 
   useEffect(() => {
     if (authLoading) return;
     if (!user) { setRole(null); return; }
-    supabase.rpc("get_admin_role", { p_user_id: user.id }).then(({ data }) => setRole((data as AdminRoleKey) ?? null));
+    getMyAdminRole().then((r) => setRole((r as AdminRoleKey | null) ?? null)).catch(() => setRole(null));
   }, [user, authLoading]);
 
   // Keep the active section within what this role may access.

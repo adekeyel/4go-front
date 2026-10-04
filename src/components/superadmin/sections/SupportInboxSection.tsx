@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import {
+  listAgentConversations, listSupportMessages, sendSupportMessage, markSupportRead, setSupportStatus,
+  type SupportConversation,
+} from "@/api/support";
+import { apiErrorMessage } from "@/lib/apiError";
+import { useAuth } from "@/contexts/AuthContext";
+import { useSocket } from "@/sockets/SocketContext";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -58,126 +64,136 @@ export default function SupportInboxSection({ id }: { id: string }) {
   const [active, setActive] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [text, setText] = useState("");
-  const [me, setMe] = useState<string | null>(null);
+  const { user } = useAuth();
+  const me = user?.id ?? null;
+  const socket = useSocket();
+  const activeIdRef = useRef<string | null>(null);
+  const lastTypingSent = useRef(0);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [filter, setFilter] = useState<"all" | ConvStatus>("all");
   const [customerTyping, setCustomerTyping] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
-  const typingChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const typingTimer = useRef<number | null>(null);
 
-  const rpc = (n: string, a: object) =>
-    (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown; error: { message: string } | null }>).call(supabase, n, a);
+  const toConversation = (c: SupportConversation): Conversation => ({
+    id: c.id,
+    user_id: c.user_id,
+    subject: c.subject,
+    status: c.status as ConvStatus,
+    last_message: (c as { last_message?: string | null }).last_message ?? null,
+    last_message_at: c.last_message_at,
+    unread_for_agent: c.unread_for_agent,
+    display_name: c.user?.display_name ?? null,
+    username: c.user?.username ?? null,
+    avatar_url: c.user?.avatar_url ?? null,
+  });
 
+  // The server returns at most 100 conversations per request (profiles included), so fetch up to three pages.
   const loadConversations = useCallback(async () => {
-    const { data } = await supabase
-      .from("support_conversations")
-      .select("id,user_id,subject,status,last_message,last_message_at,unread_for_agent")
-      .order("last_message_at", { ascending: false })
-      .limit(300);
-    const convs = (data || []) as Conversation[];
-    const ids = [...new Set(convs.map((c) => c.user_id))];
-    if (ids.length) {
-      const { data: profs } = await supabase
-        .from("profiles")
-        .select("user_id,display_name,username,avatar_url")
-        .in("user_id", ids);
-      const map = new Map((profs || []).map((p) => [p.user_id, p]));
-      convs.forEach((c) => {
-        const p = map.get(c.user_id);
-        c.display_name = p?.display_name ?? null;
-        c.username = p?.username ?? null;
-        c.avatar_url = p?.avatar_url ?? null;
-      });
+    try {
+      const all: SupportConversation[] = [];
+      for (let offset = 0; offset < 300; offset += 100) {
+        const page = await listAgentConversations({ limit: 100, offset });
+        all.push(...page);
+        if (page.length < 100) break;
+      }
+      setConversations(all.map(toConversation));
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not load conversations"));
     }
-    setConversations(convs);
     setLoading(false);
   }, []);
 
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setMe(data.user?.id ?? null));
-    void loadConversations();
-  }, [loadConversations]);
+  useEffect(() => { void loadConversations(); }, [loadConversations]);
 
-  useEffect(() => {
-    const ch = supabase
-      .channel("support-inbox")
-      .on("postgres_changes", { event: "*", schema: "public", table: "support_conversations" }, () => void loadConversations())
-      .subscribe();
-    return () => { void supabase.removeChannel(ch); };
-  }, [loadConversations]);
-
-  const openConversation = useCallback(async (c: Conversation) => {
-    setActive(c);
-    setCustomerTyping(false);
-    const { data } = await supabase
-      .from("support_messages")
-      .select("*")
-      .eq("conversation_id", c.id)
-      .order("created_at", { ascending: true });
-    setMessages((data || []) as Msg[]);
-    if (c.unread_for_agent > 0) {
-      await supabase.from("support_conversations").update({ unread_for_agent: 0 }).eq("id", c.id);
+  const loadMessages = useCallback(async (conversationId: string) => {
+    try {
+      const msgs = await listSupportMessages(conversationId);
+      if (activeIdRef.current !== conversationId) return; // the agent already switched to another chat
+      setMessages(msgs as Msg[]);
+      void markSupportRead(conversationId).catch(() => undefined);
+      setConversations((prev) => prev.map((c) => (c.id === conversationId ? { ...c, unread_for_agent: 0 } : c)));
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not load the messages"));
     }
   }, []);
 
-  // Realtime messages + typing for the open conversation
+  const openConversation = useCallback(async (c: Conversation) => {
+    activeIdRef.current = c.id;
+    setActive(c);
+    setCustomerTyping(false);
+    setMessages([]);
+    await loadMessages(c.id);
+  }, [loadMessages]);
+
+  // Live updates over the socket: the server tells every support agent when a customer writes in
+  // (without the text), and relays typing for the conversation we have open.
   useEffect(() => {
-    if (!active) return;
-    const ch = supabase
-      .channel(`support-msgs-${active.id}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "support_messages", filter: `conversation_id=eq.${active.id}` },
-        (payload) => {
-          const m = payload.new as Msg;
-          if (!m.is_agent) setCustomerTyping(false);
-          setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
-        },
-      )
-      .subscribe();
-
-    const typingCh = supabase
-      .channel(`support-typing-${active.id}`)
-      .on("broadcast", { event: "typing" }, (payload) => {
-        if (payload.payload?.is_agent) return;
-        setCustomerTyping(true);
-        if (typingTimer.current) window.clearTimeout(typingTimer.current);
-        typingTimer.current = window.setTimeout(() => setCustomerTyping(false), 3000);
-      })
-      .subscribe();
-    typingChannelRef.current = typingCh;
-
-    return () => {
-      void supabase.removeChannel(ch);
-      void supabase.removeChannel(typingCh);
-      typingChannelRef.current = null;
+    if (!socket) return;
+    const onMessage = (ev: { conversationId: string }) => {
+      void loadConversations();
+      if (ev.conversationId === activeIdRef.current) {
+        setCustomerTyping(false);
+        void loadMessages(ev.conversationId);
+      }
     };
-  }, [active]);
+    const onTyping = (ev: { conversationId: string; userId: string; typing: boolean }) => {
+      if (ev.conversationId !== activeIdRef.current || ev.userId === me) return;
+      if (typingTimer.current) window.clearTimeout(typingTimer.current);
+      setCustomerTyping(!!ev.typing);
+      if (ev.typing) typingTimer.current = window.setTimeout(() => setCustomerTyping(false), 3000);
+    };
+    socket.on("support:message", onMessage);
+    socket.on("support:typing", onTyping);
+    return () => {
+      socket.off("support:message", onMessage);
+      socket.off("support:typing", onTyping);
+    };
+  }, [socket, me, loadConversations, loadMessages]);
+
+  // Join the open conversation's room so its typing events reach us.
+  useEffect(() => {
+    if (!socket || !active) return;
+    socket.emit("support:join", active.id);
+    return () => { socket.emit("support:leave", active.id); };
+  }, [socket, active?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, customerTyping]);
 
   const broadcastTyping = () => {
-    typingChannelRef.current?.send({ type: "broadcast", event: "typing", payload: { is_agent: true } });
+    if (!active) return;
+    const now = Date.now();
+    if (now - lastTypingSent.current < 2000) return; // don't spam the socket on every keystroke
+    lastTypingSent.current = now;
+    socket?.emit("support:typing", { conversationId: active.id, typing: true });
   };
 
   const send = async () => {
-    if (!active || !me || !text.trim()) return;
+    if (!active || !text.trim()) return;
     setSending(true);
     const body = text.trim();
     setText("");
-    const { error } = await supabase.from("support_messages").insert({
-      conversation_id: active.id, sender_id: me, is_agent: true, content: body,
-    });
+    try {
+      const m = await sendSupportMessage(active.id, body);
+      // The server doesn't echo an agent's own reply back over the socket, so add it here.
+      setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m as Msg]));
+      void loadConversations();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not send the reply"));
+      setText(body);
+    }
     setSending(false);
-    if (error) { toast.error(error.message); setText(body); return; }
   };
 
   const changeStatus = async (status: ConvStatus) => {
-    if (!active || !me) return;
-    const { error } = await rpc("set_support_status", { p_agent_id: me, p_conv: active.id, p_status: status });
-    if (error) { toast.error(error.message); return; }
+    if (!active) return;
+    try {
+      await setSupportStatus(active.id, status);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not change the status"));
+      return;
+    }
     setActive({ ...active, status });
     toast.success(`Marked as ${STATUS_META[status].label}`);
     void loadConversations();

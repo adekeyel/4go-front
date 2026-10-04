@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { toast } from "sonner";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -61,19 +62,13 @@ export default function UsersSection({
   const search = (globalSearch || localSearch).toLowerCase().trim();
   const isSuper = role === "super_admin" || role == null;
 
-  const rpc = (n: string, a: object) =>
-    (supabase.rpc as never as (n: string, a: object) => Promise<{ data: unknown; error: { message: string } | null }>).call(supabase, n, a);
-
   useEffect(() => {
     if (!profileUser) { setDetail(null); return; }
     let cancelled = false;
     setDetailLoading(true);
     (async () => {
-      const { data: authData } = await supabase.auth.getUser();
-      const adminId = authData.user?.id;
-      if (!adminId) return;
-      const { data } = await rpc("admin_user_detail", { p_admin_id: adminId, p_user: profileUser.user_id });
-      if (!cancelled) { setDetail((data as UserDetail) ?? null); setDetailLoading(false); }
+      const data = await adminApi.getUserDetail<UserDetail>(profileUser.user_id).catch(() => null);
+      if (!cancelled) { setDetail(data); setDetailLoading(false); }
     })();
     return () => { cancelled = true; };
   }, [profileUser]);
@@ -93,28 +88,39 @@ export default function UsersSection({
     return list;
   }, [users, variant, search]);
 
-  const update = async (u: AdminUser, patch: Record<string, unknown>, msg: string) => {
+  // Runs one admin action against the backend, then reports the result and reloads the list.
+  const update = async (action: () => Promise<unknown>, msg: string) => {
     setBusy(true);
-    const { error } = await supabase.from("profiles").update(patch as never).eq("user_id", u.user_id);
+    try {
+      await action();
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "That didn't work"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success(msg);
     refresh();
   };
 
   const suspend = (u: AdminUser) => {
-    if (u.is_suspended) return update(u, { is_suspended: false, suspended_at: null, suspended_reason: null }, "User reinstated");
+    if (u.is_suspended) return update(() => adminApi.unsuspendUser(u.user_id), "User reinstated");
     const reason = window.prompt("Reason for suspension / ban?", "Violation of community guidelines");
     if (reason === null) return;
-    return update(u, { is_suspended: true, suspended_at: new Date().toISOString(), suspended_reason: reason }, "User suspended");
+    return update(() => adminApi.suspendUser(u.user_id, reason), "User suspended");
   };
 
   const removeUser = async (u: AdminUser) => {
     if (!window.confirm(`Permanently delete ${u.display_name || u.username}? This cannot be undone.`)) return;
     setBusy(true);
-    const { error } = await supabase.functions.invoke("admin-delete-user", { body: { target_user_id: u.user_id } });
+    try {
+      await adminApi.deleteUser(u.user_id);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Failed to delete user"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message || "Failed to delete user"); return; }
     toast.success("User deleted");
     refresh();
   };
@@ -122,24 +128,29 @@ export default function UsersSection({
   const sendNotify = async () => {
     if (!notifyUser || !notifyTitle.trim() || !notifyBody.trim()) return;
     setBusy(true);
-    const { error } = await supabase.functions.invoke("send-push", {
-      body: { user_ids: [notifyUser.user_id], title: notifyTitle.trim(), body: notifyBody.trim() },
-    });
+    try {
+      await adminApi.notifyUser(notifyUser.user_id, notifyTitle.trim(), notifyBody.trim());
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Failed to send"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error("Failed to send"); return; }
     toast.success("Notification sent");
     setNotifyUser(null); setNotifyTitle(""); setNotifyBody("");
   };
 
   const toggleMonetize = async (u: AdminUser) => {
-    const { data: authData } = await supabase.auth.getUser();
-    const adminId = authData.user?.id;
-    if (!adminId) return;
     setBusy(true);
     const next = !u.is_monetized;
-    const { error } = await rpc("admin_set_monetized", { p_admin_id: adminId, p_user: u.user_id, p_value: next });
+    try {
+      await adminApi.setUserMonetized(u.user_id, next);
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not change monetization"));
+      return;
+    }
     setBusy(false);
-    if (error) { toast.error(error.message); return; }
     toast.success(next ? "User monetized" : "User unmonetized");
     refresh();
   };
@@ -208,10 +219,10 @@ export default function UsersSection({
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-48">
                         <DropdownMenuItem onClick={() => setProfileUser(u)}>View Profile</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => update(u, { is_verified: !u.is_verified }, u.is_verified ? "Verification removed" : "User verified")}>
+                        <DropdownMenuItem onClick={() => update(() => adminApi.setUserVerified(u.user_id, !u.is_verified), u.is_verified ? "Verification removed" : "User verified")}>
                           <BadgeCheck className="mr-2 h-4 w-4" /> {u.is_verified ? "Unverify" : "Verify"}
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => update(u, { is_premium: !u.is_premium }, u.is_premium ? "Premium removed" : "Premium granted")}>
+                        <DropdownMenuItem onClick={() => update(() => adminApi.setUserPremium(u.user_id, !u.is_premium), u.is_premium ? "Premium removed" : "Premium granted")}>
                           <Crown className="mr-2 h-4 w-4" /> {u.is_premium ? "Remove Premium" : "Grant Premium"}
                         </DropdownMenuItem>
                         {isSuper && (

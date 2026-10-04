@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as adminApi from "@/api/admin";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
@@ -35,8 +36,8 @@ export default function AdvertisersSection({ id }: { id: string }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase.from("advertisers").select("*").order("created_at", { ascending: false });
-    setRows((data || []) as Advertiser[]);
+    const data = await adminApi.listAdvertisers<Advertiser>().catch(() => [] as Advertiser[]);
+    setRows(data);
     setLoading(false);
   }, []);
 
@@ -59,11 +60,15 @@ export default function AdvertisersSection({ id }: { id: string }) {
       contact_phone: form.contact_phone.trim() || null,
       notes: form.notes.trim() || null,
     };
-    const res = editId
-      ? await supabase.from("advertisers").update(payload as never).eq("id", editId)
-      : await supabase.from("advertisers").insert({ ...payload, created_by: user.id } as never);
+    try {
+      if (editId) await adminApi.updateAdvertiser(editId, payload);
+      else await adminApi.createAdvertiser(payload); // the server records who created it
+    } catch (e) {
+      setBusy(false);
+      toast.error(apiErrorMessage(e, "Could not save the advertiser"));
+      return;
+    }
     setBusy(false);
-    if (res.error) { toast.error(res.error.message); return; }
     toast.success(editId ? "Advertiser updated" : "Advertiser registered");
     setOpen(false);
     void load();
@@ -71,8 +76,12 @@ export default function AdvertisersSection({ id }: { id: string }) {
 
   const remove = async (a: Advertiser) => {
     if (!window.confirm(`Delete advertiser "${a.name}"? Their banners will be kept but unlinked.`)) return;
-    const { error } = await supabase.from("advertisers").delete().eq("id", a.id);
-    if (error) { toast.error(error.message); return; }
+    try {
+      await adminApi.deleteAdvertiser(a.id);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not delete the advertiser"));
+      return;
+    }
     toast.success("Advertiser deleted");
     void load();
   };
