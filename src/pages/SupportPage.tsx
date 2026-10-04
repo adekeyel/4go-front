@@ -5,7 +5,8 @@ import PageFooter from "@/components/PageFooter";
 import UserAvatar from "@/components/UserAvatar";
 import VerifiedBadge from "@/components/VerifiedBadge";
 import SupportLiveChat from "@/components/support/SupportLiveChat";
-import { supabase } from "@/integrations/supabase/client";
+import { getProfilesByUsernames } from "@/api/profiles";
+import { getOrCreateDmRoom } from "@/api/rooms";
 import { useAuth } from "@/contexts/AuthContext";
 import { SUPPORT_AGENT_USERNAMES } from "@/lib/supportAgents";
 
@@ -34,14 +35,11 @@ export default function SupportPage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data } = await supabase
-        .from("profiles")
-        .select("user_id, username, display_name, avatar_url, is_online")
-        .in("username", SUPPORT_AGENT_USERNAMES as unknown as string[]);
+      const data = await getProfilesByUsernames(SUPPORT_AGENT_USERNAMES as unknown as string[]).catch(() => null);
       if (!cancelled && data) {
         // Preserve the requested order
         const ordered = SUPPORT_AGENT_USERNAMES
-          .map((u) => data.find((a) => a.username === u))
+          .map((u) => data.find((a) => a.username?.toLowerCase() === u.toLowerCase()))
           .filter(Boolean) as AgentProfile[];
         setAgents(ordered);
       }
@@ -56,11 +54,8 @@ export default function SupportPage() {
       navigate("/login");
       return;
     }
-    const { data, error } = await supabase.rpc("get_or_create_dm_room", {
-      user1_id: user.id,
-      user2_id: agentId,
-    });
-    if (!error && data) navigate(`/room/${data}`);
+    const room = await getOrCreateDmRoom(agentId).catch(() => null);
+    if (room?.id) navigate(`/room/${room.id}`);
   };
 
   return (

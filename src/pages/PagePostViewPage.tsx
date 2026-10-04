@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
 import { useAuth } from "@/contexts/AuthContext";
 import PagePostCard, { PagePostCardData } from "@/components/pages/PagePostCard";
 import BottomNav from "@/components/BottomNav";
@@ -18,33 +18,11 @@ export default function PagePostViewPage() {
   useEffect(() => {
     if (!postId) return;
     (async () => {
-      const { data } = await supabase
-        .from("page_posts")
-        .select("*")
-        .eq("id", postId)
-        .maybeSingle();
-      if (!data) { setMissing(true); setLoading(false); return; }
-      const { data: page } = await supabase
-        .from("pages")
-        .select("name, profile_image")
-        .eq("id", data.page_id)
-        .maybeSingle();
-      let isLiked = false, isSaved = false;
-      if (user) {
-        const { data: like } = await supabase.from("post_likes").select("id").eq("post_id", postId).eq("user_id", user.id).maybeSingle();
-        isLiked = !!like;
-        const { data: save } = await supabase.from("post_saves").select("id").eq("post_id", postId).eq("user_id", user.id).maybeSingle();
-        isSaved = !!save;
+      try {
+        setPost(await pagesApi.getPagePost(postId));
+      } catch {
+        setMissing(true);
       }
-      setPost({
-        ...data,
-        page_name: page?.name ?? null,
-        page_avatar: page?.profile_image ?? null,
-        is_followed: false,
-        is_boosted: false,
-        is_liked: isLiked,
-        is_saved: isSaved,
-      });
       setLoading(false);
     })();
     // user?.id (primitive) used deliberately to avoid re-fetching on every auth refresh.

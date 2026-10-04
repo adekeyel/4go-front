@@ -5,6 +5,7 @@ import * as roomsApi from "@/api/rooms";
 import * as friendsApi from "@/api/friends";
 import * as profilesApi from "@/api/profiles";
 import type { BannerData } from "@/components/InAppBanner";
+import { SW_URL } from "@/lib/swUrl";
 
 const SOUND_KEY = "4go-notification-sound";
 
@@ -101,7 +102,7 @@ export function useNotifications() {
     if (Notification.permission === "granted") {
       setPermissionGranted(true);
       if ("serviceWorker" in navigator) {
-        try { await navigator.serviceWorker.register("/sw.js"); } catch { /* noop */ }
+        try { await navigator.serviceWorker.register(SW_URL); } catch { /* noop */ }
       }
       return true;
     }

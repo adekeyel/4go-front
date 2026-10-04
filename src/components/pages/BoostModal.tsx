@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
+import * as walletApi from "@/api/wallet";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -23,12 +25,8 @@ export default function BoostModal({ open, onOpenChange, postId, onBoosted }: Bo
 
   useEffect(() => {
     if (!open || !user) return;
-    supabase
-      .from("profiles")
-      .select("purchased_coins")
-      .eq("user_id", user.id)
-      .single()
-      .then(({ data }) => setPurchased(data?.purchased_coins ?? 0));
+    // Boosts are paid with purchased coins only; the wallet endpoint reports that balance.
+    walletApi.getWallet().then((w) => setPurchased(w.purchased_coins ?? 0)).catch(() => setPurchased(0));
   }, [open, user]);
 
   const handleBoost = async (plan: BoostPlan, cost: number) => {
@@ -39,18 +37,13 @@ export default function BoostModal({ open, onOpenChange, postId, onBoosted }: Bo
     }
     setBusy(plan);
     try {
-      const { error } = await supabase.rpc("boost_page_post", {
-        p_user_id: user.id,
-        p_post_id: postId,
-        p_plan: plan,
-      });
-      if (error) throw error;
+      await pagesApi.boostPagePost(postId, plan);
       toast.success("🚀 Boost activated!");
       await refreshProfile();
       onBoosted?.();
       onOpenChange(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to boost");
+      toast.error(apiErrorMessage(err, "Failed to boost"));
     } finally {
       setBusy(null);
     }

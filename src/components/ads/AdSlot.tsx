@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { listBanners, trackAdEvent } from "@/api/ads";
 import { usePremium } from "@/hooks/usePremium";
 import type { AdPlacementId } from "@/lib/adPlacements";
 import { cn } from "@/lib/utils";
@@ -38,16 +38,10 @@ export default function AdSlot({
     if (premiumLoading || isPremium) return;
     let cancelled = false;
     (async () => {
-      let query = supabase
-        .from("ad_banners")
-        .select("id, image_url, target_url")
-        .eq("status", "active")
-        .contains("placements", [placement]);
-      if (position) query = query.eq("position", position);
-      const { data } = await query.limit(20);
-      if (cancelled || !data || data.length === 0) { setBanners([]); return; }
+      const data = await listBanners(placement, position).catch(() => []);
+      if (cancelled || data.length === 0) { setBanners([]); return; }
       // Shuffle so the starting ad varies per mount.
-      const shuffled = [...(data as Banner[])].sort(() => Math.random() - 0.5);
+      const shuffled = [...(data as Banner[])].slice(0, 20).sort(() => Math.random() - 0.5);
       setBanners(shuffled);
       setIndex(0);
     })();
@@ -68,13 +62,13 @@ export default function AdSlot({
   useEffect(() => {
     if (banner && !trackedIds.current.has(banner.id)) {
       trackedIds.current.add(banner.id);
-      void supabase.rpc("track_ad_event", { p_banner_id: banner.id, p_event: "impression" });
+      void trackAdEvent(banner.id, "impression");
     }
   }, [banner]);
 
   const handleClick = () => {
     if (!banner) return;
-    void supabase.rpc("track_ad_event", { p_banner_id: banner.id, p_event: "click" });
+    void trackAdEvent(banner.id, "click");
   };
 
   const container = useMemo(

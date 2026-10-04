@@ -4,7 +4,6 @@ import { useSocket } from "@/sockets/SocketContext";
 import { toast } from "sonner";
 import { canMakeVoiceCall, canMakeVideoCall, callPermissionDenialMessage } from "@/lib/callPermissions";
 import * as callsApi from "@/api/calls";
-import { supabase } from "@/integrations/supabase/client";
 
 export type CallType = "voice" | "video";
 export type CallState = "idle" | "calling" | "ringing" | "connected" | "ended";
@@ -106,6 +105,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
 
+  const groupInvitesRef = useRef<Map<string, string>>(new Map()); // callId -> invited user, for group-call invites
   const callIdRef = useRef<string | null>(null);
   const callStateRef = useRef<CallState>("idle");
   const callTypeRef = useRef<CallType>("voice");
@@ -439,25 +439,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         sdp: offer,
       });
 
-      // Best-effort push for locked/closed app delivery — unchanged from
-      // before (Supabase Edge Function, separate from the DB migration).
-      void supabase.functions.invoke("send-push", {
-        body: {
-          user_ids: [peerId],
-          title: `${callerName} is calling`,
-          body: `Incoming ${type} call — tap to answer`,
-          data: {
-            navigateTo: `/call/${call.id}`,
-            tag: `call-${call.id}`,
-            kind: "incoming_call",
-            callerName,
-            callerId: user.id,
-            callType: type,
-            roomId,
-            callId: call.id,
-          },
-        },
-      });
+      // The server sends the incoming-call push itself when it receives call:invite.
     } catch (err) {
       console.error("startCall:", err);
       handleMediaError(err, type);
@@ -495,33 +477,19 @@ export function CallProvider({ children }: { children: ReactNode }) {
       // participant, then fans out via "join-mesh" once they answer (see the
       // "answer" branch in the socket listener below) so every existing
       // participant also opens a direct connection to them.
+      groupInvitesRef.current.set(call.id, peerId);
       socket?.emit("call:invite", {
         callId: call.id,
         roomId,
         calleeId: peerId,
         callType: callTypeRef.current,
+        group: true,
         callerName,
         callerAvatarUrl: profile?.avatar_url,
         sdp: offer,
       });
 
-      void supabase.functions.invoke("send-push", {
-        body: {
-          user_ids: [peerId],
-          title: `Group ${callTypeRef.current} call`,
-          body: `${callerName} added you to a call`,
-          data: {
-            navigateTo: `/call/${call.id}`,
-            tag: `call-${call.id}`,
-            kind: "incoming_call",
-            callerName,
-            callerId: user.id,
-            callType: callTypeRef.current,
-            roomId,
-            callId: call.id,
-          },
-        },
-      });
+      // The server sends the incoming-call push itself when it receives call:invite.
 
       toast.success(`Inviting ${peerName} to call…`);
     } catch (err) {
@@ -582,20 +550,12 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const endCall = useCallback(() => {
     peersRef.current.forEach((_entry, peerId) => sendSignal(peerId, { type: "leave" }));
 
-    const notifyUserIds = Array.from(new Set([
-      initialPeerIdRef.current,
-      ...Array.from(peersRef.current.keys()),
-    ].filter((id): id is string => Boolean(id && id !== user?.id))));
-    if (notifyUserIds.length > 0 && callIdRef.current) {
-      void supabase.functions.invoke("send-push", {
-        body: {
-          user_ids: notifyUserIds,
-          title: "Call ended",
-          body: "The call has ended",
-          data: { kind: "call_cancelled", tag: `call-${callIdRef.current}`, callId: callIdRef.current, roomId: callRoomIdRef.current },
-        },
-      });
-    }
+    // The server sends the "call ended" push when the call row's status is updated (finalizeCallLog below).
+    // Group invitees who never joined have their own call rows: close those too so their phones stop ringing.
+    groupInvitesRef.current.forEach((peerId, callId) => {
+      if (!peersRef.current.has(peerId)) void callsApi.updateCallStatus(callId, "cancelled").catch(() => {});
+    });
+    groupInvitesRef.current.clear();
 
     finalizeCallLog(callStateRef.current === "connected" ? "answered" : "cancelled");
     cleanup();

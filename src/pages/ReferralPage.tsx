@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { getMyReferrals } from "@/api/referrals";
 import { useAuth } from "@/contexts/AuthContext";
 import BottomNav from "@/components/BottomNav";
 import UserAvatar from "@/components/UserAvatar";
@@ -28,39 +28,23 @@ export default function ReferralPage() {
   const fetchData = useCallback(async () => {
     if (!user) return;
 
-    // Get referral code
-    const { data: prof } = await supabase
-      .from("profiles")
-      .select("referral_code")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (prof?.referral_code) {
-      setReferralCode(prof.referral_code);
-    }
-
-    // Get referrals
-    const { data: refs } = await supabase
-      .from("referrals")
-      .select("id, referred_id, coins_rewarded, created_at")
-      .eq("referrer_id", user.id)
-      .order("created_at", { ascending: false });
-
-    if (refs && refs.length > 0) {
-      const referredIds = refs.map((r) => r.referred_id);
-      const { data: profiles } = await supabase
-        .from("profiles")
-        .select("user_id, display_name, avatar_url")
-        .in("user_id", referredIds);
-
-      const profileMap = new Map(profiles?.map((p) => [p.user_id, p]));
-
+    try {
+      // One call returns your code (created if you don't have one yet) and who you referred.
+      const overview = await getMyReferrals();
+      if (overview.code) setReferralCode(overview.code);
       setReferrals(
-        refs.map((r) => ({
-          ...r,
-          profile: profileMap.get(r.referred_id) || undefined,
+        overview.referrals.map((r) => ({
+          id: r.id,
+          referred_id: r.referred?.user_id ?? "",
+          coins_rewarded: r.coins_rewarded,
+          created_at: r.created_at,
+          profile: r.referred
+            ? { display_name: r.referred.display_name, avatar_url: r.referred.avatar_url }
+            : undefined,
         }))
       );
+    } catch {
+      // leave the page empty; the user can retry by reopening it
     }
 
     setLoading(false);

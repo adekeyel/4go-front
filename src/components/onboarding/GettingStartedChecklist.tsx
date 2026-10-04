@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { listFriends } from "@/api/friends";
+import { getMyPostCount } from "@/api/feed";
 import { useAuth } from "@/contexts/AuthContext";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -44,16 +45,9 @@ export default function GettingStartedChecklist({ hasJoinedRoom }: Props) {
     let cancelled = false;
 
     (async () => {
-      const [{ count: friends }, { count: posts }] = await Promise.all([
-        supabase
-          .from("friends")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "accepted")
-          .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`),
-        supabase
-          .from("posts")
-          .select("id", { count: "exact", head: true })
-          .eq("user_id", user.id),
+      const [friends, posts] = await Promise.all([
+        listFriends().then((f) => f.length).catch(() => 0),
+        getMyPostCount().catch(() => 0),
       ]);
       if (!cancelled) {
         setFriendCount(friends ?? 0);

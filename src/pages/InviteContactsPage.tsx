@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
 import BottomNav from "@/components/BottomNav";
-import { supabase } from "@/integrations/supabase/client";
+import { syncContacts, findContactMatches } from "@/api/contacts";
+import { sendFriendRequest } from "@/api/friends";
+import axios from "axios";
 
 interface PickedContact {
   name: string[];
@@ -84,8 +86,7 @@ export default function InviteContactsPage() {
           .map(normalizePhone)
           .filter((phone) => phone.length >= 7)
           .map(async (phone) => ({
-            owner_id: user.id,
-            contact_name: contactName,
+            name: contactName,
             phone_hash: await sha256Hex(phone),
           }));
       })
@@ -98,16 +99,9 @@ export default function InviteContactsPage() {
       return;
     }
 
-    await supabase.from("device_contacts").delete().eq("owner_id", user.id);
-    const { error: insertError } = await supabase.from("device_contacts").insert(dedupedRows);
-    if (insertError) throw insertError;
-
-    const { data, error } = await supabase.rpc("find_contact_matches", {
-      p_user_id: user.id,
-      p_limit: 50,
-    });
-    if (error) throw error;
-    setMatches((data || []) as ContactMatch[]);
+    // replace: true makes this upload the whole picked set, like the delete-then-insert it replaces.
+    await syncContacts(dedupedRows, true);
+    setMatches(await findContactMatches(50));
   };
 
   const pickContacts = async () => {
@@ -138,22 +132,15 @@ export default function InviteContactsPage() {
     if (!user) return;
     setSendingTo(addresseeId);
     try {
-      const { data: existing } = await supabase
-        .from("friends")
-        .select("id, status")
-        .or(`and(requester_id.eq.${user.id},addressee_id.eq.${addresseeId}),and(requester_id.eq.${addresseeId},addressee_id.eq.${user.id})`)
-        .maybeSingle();
-
-      if (existing) {
-        toast.info(existing.status === "accepted" ? "Already friends" : "Friend request already exists");
-        return;
+      try {
+        await sendFriendRequest(addresseeId);
+      } catch (err) {
+        if (axios.isAxiosError(err) && err.response?.status === 409) {
+          toast.info("Friend request already exists");
+          return;
+        }
+        throw err;
       }
-
-      const { error } = await supabase.from("friends").insert({
-        requester_id: user.id,
-        addressee_id: addresseeId,
-      });
-      if (error) throw error;
 
       setMatches((prev) => prev.map((match) => (
         match.user_id === addresseeId ? { ...match, has_pending_request: true } : match

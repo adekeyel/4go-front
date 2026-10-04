@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { listMessageReactions, reactToMessage, removeReaction, type ReactionRow } from "@/api/messages";
+import { useSocket } from "@/sockets/SocketContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { SmilePlus } from "lucide-react";
 import {
@@ -10,13 +11,6 @@ import {
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"] as const;
 
-interface ReactionRow {
-  id: string;
-  message_id: string;
-  user_id: string;
-  emoji: string;
-}
-
 interface Props {
   messageId: string;
   isOwn?: boolean;
@@ -24,34 +18,35 @@ interface Props {
 
 export default function MessageReactions({ messageId, isOwn }: Props) {
   const { user } = useAuth();
+  const socket = useSocket();
   const [reactions, setReactions] = useState<ReactionRow[]>([]);
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
     let mounted = true;
-    const load = async () => {
-      const { data } = await supabase
-        .from("message_reactions")
-        .select("*")
-        .eq("message_id", messageId);
-      if (mounted) setReactions(data ?? []);
-    };
-    load();
+    listMessageReactions(messageId)
+      .then((data) => { if (mounted) setReactions(data ?? []); })
+      .catch(() => undefined);
 
-    const channel = supabase
-      .channel(`reactions-${messageId}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "message_reactions", filter: `message_id=eq.${messageId}` },
-        () => load()
-      )
-      .subscribe();
+    // Live updates come from the backend's room socket (reaction:new / reaction:removed).
+    const onNew = (r: ReactionRow) => {
+      if (!mounted || r.message_id !== messageId) return;
+      // One reaction per person: a new emoji from the same user replaces their old one.
+      setReactions((prev) => [...prev.filter((x) => x.user_id !== r.user_id), r]);
+    };
+    const onRemoved = (r: { message_id: string; user_id: string; emoji: string }) => {
+      if (!mounted || r.message_id !== messageId) return;
+      setReactions((prev) => prev.filter((x) => !(x.user_id === r.user_id && x.emoji === r.emoji)));
+    };
+    socket?.on("reaction:new", onNew);
+    socket?.on("reaction:removed", onRemoved);
 
     return () => {
       mounted = false;
-      supabase.removeChannel(channel);
+      socket?.off("reaction:new", onNew);
+      socket?.off("reaction:removed", onRemoved);
     };
-  }, [messageId]);
+  }, [messageId, socket]);
 
   const grouped = reactions.reduce<Record<string, { count: number; mine: boolean }>>(
     (acc, r) => {
@@ -67,17 +62,16 @@ export default function MessageReactions({ messageId, isOwn }: Props) {
     if (!user) return;
     setOpen(false);
     const mine = grouped[emoji]?.mine;
-    if (mine) {
-      await supabase
-        .from("message_reactions")
-        .delete()
-        .eq("message_id", messageId)
-        .eq("user_id", user.id)
-        .eq("emoji", emoji);
-    } else {
-      await supabase
-        .from("message_reactions")
-        .insert({ message_id: messageId, user_id: user.id, emoji });
+    try {
+      if (mine) {
+        await removeReaction(messageId, emoji);
+        setReactions((prev) => prev.filter((x) => !(x.user_id === user.id && x.emoji === emoji)));
+      } else {
+        const created = await reactToMessage(messageId, emoji);
+        setReactions((prev) => [...prev.filter((x) => x.user_id !== user.id), created]);
+      }
+    } catch {
+      // leave the list as is; the socket will correct it if the server state changed
     }
   };
 

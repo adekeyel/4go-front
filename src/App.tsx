@@ -34,7 +34,6 @@ const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const RanksPage = lazy(() => import("./pages/RanksPage"));
 const TreasuresPage = lazy(() => import("./pages/TreasuresPage"));
 const NotFound = lazy(() => import("./pages/NotFound"));
-const AdminPage = lazy(() => import("./pages/AdminPage"));
 const SuperAdminPage = lazy(() => import("./pages/SuperAdminPage"));
 const ReferralPage = lazy(() => import("./pages/ReferralPage"));
 const WalletPage = lazy(() => import("./pages/WalletPage"));
@@ -129,7 +128,7 @@ const App = () => (
               <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
               <Route path="/ranks" element={<ProtectedRoute><RanksPage /></ProtectedRoute>} />
               <Route path="/treasures" element={<ProtectedRoute><TreasuresPage /></ProtectedRoute>} />
-              <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
+              <Route path="/admin" element={<Navigate to="/super-admin" replace />} />
               <Route path="/super-admin" element={<ProtectedRoute><SuperAdminPage /></ProtectedRoute>} />
               <Route path="/referrals" element={<ProtectedRoute><ReferralPage /></ProtectedRoute>} />
               <Route path="/wallet" element={<ProtectedRoute><WalletPage /></ProtectedRoute>} />

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
 import { useAuth } from "@/contexts/AuthContext";
 import { Bookmark, BookmarkCheck, Download, Eye, Heart, MessageCircle, Rocket, Share2 } from "lucide-react";
 import { toast } from "sonner";
@@ -56,7 +56,7 @@ export default function PagePostCard({ post, onChange }: Props) {
       async ([entry]) => {
         if (entry.isIntersecting && !viewed) {
           setViewed(true);
-          await supabase.rpc("record_page_post_view", { p_user_id: user.id, p_post_id: post.id });
+          await pagesApi.recordPagePostView(post.id).catch(() => {});
         }
       },
       { threshold: 0.5 }
@@ -67,17 +67,14 @@ export default function PagePostCard({ post, onChange }: Props) {
 
   const toggleSave = async () => {
     if (!user) return;
-    if (saved) {
-      await supabase.from("post_saves").delete().eq("user_id", user.id).eq("post_id", post.id);
-      setSaved(false);
-      setSavesCount((c) => Math.max(0, c - 1));
-    } else {
-      const { error } = await supabase.from("post_saves").insert({ user_id: user.id, post_id: post.id });
-      if (!error) {
-        setSaved(true);
-        setSavesCount((c) => c + 1);
-        toast.success("Saved to your library");
-      }
+    try {
+      const r = await pagesApi.togglePagePostSave(post.id);
+      if (r.saved !== saved) setSavesCount((c) => (r.saved ? c + 1 : Math.max(0, c - 1)));
+      setSaved(r.saved);
+      if (r.saved) toast.success("Saved to your library");
+    } catch {
+      toast.error("Couldn't update your library");
+      return;
     }
     onChange?.();
   };
@@ -93,11 +90,7 @@ export default function PagePostCard({ post, onChange }: Props) {
     setLiked(newLiked);
     setLikesCount((c) => c + (newLiked ? 1 : -1));
     try {
-      const { error } = await supabase.rpc("toggle_page_post_like", {
-        p_user_id: user.id,
-        p_post_id: post.id,
-      });
-      if (error) throw error;
+      await pagesApi.togglePagePostLike(post.id);
     } catch {
       setLiked(!newLiked);
       setLikesCount((c) => c + (newLiked ? -1 : 1));

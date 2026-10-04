@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { listEarnings } from "@/api/wallet";
 import { useAuth } from "@/contexts/AuthContext";
 import BottomNav from "@/components/BottomNav";
 import { ArrowLeft, Eye, Coins, TrendingUp, BarChart3, Calendar } from "lucide-react";
@@ -31,15 +31,8 @@ export default function AnalyticsPage() {
     const since = subDays(new Date(), period).toISOString();
 
     // Fetch earning transactions for this user
-    const { data: earnings } = await supabase
-      .from("transactions")
-      .select("amount, created_at")
-      .eq("user_id", user.id)
-      .eq("source", "earning")
-      .gte("created_at", since)
-      .order("created_at", { ascending: true });
-
-    const txData = earnings || [];
+    const earnings = await listEarnings(since).catch(() => []);
+    const txData = earnings;
 
     // Build daily map
     const dayMap: Record<string, { views: number; earnings: number }> = {};

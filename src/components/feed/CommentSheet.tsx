@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as feedApi from "@/api/feed";
+import { apiErrorMessage } from "@/lib/apiError";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -53,18 +54,14 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
 
   const fetchComments = async () => {
     if (!postId) return;
-    const { data } = await supabase
-      .from("post_comments")
-      .select("*")
-      .eq("post_id", postId)
-      .order("created_at", { ascending: true });
-    if (!data) return;
-    const userIds = [...new Set(data.map((c) => c.user_id))];
-    const { data: profiles } = await supabase
-      .from("profiles")
-      .select("user_id, display_name, avatar_url, username")
-      .in("user_id", userIds);
-    const pmap = Object.fromEntries((profiles || []).map((p) => [p.user_id, p])) as Record<string, Profile>;
+    let data: feedApi.CommentRow[];
+    try {
+      data = await feedApi.listComments(postId, !!pageMode);
+    } catch {
+      return;
+    }
+    const pmap: Record<string, Profile> = {};
+    for (const c of data) if (c.profile) pmap[c.user_id] = c.profile;
     setProfileMap(pmap);
     const flat: Comment[] = data.map((c) => ({ ...c, profile: pmap[c.user_id], children: [] }));
     // Build tree
@@ -123,12 +120,7 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
     setSending(true);
     try {
       if (editing) {
-        const { error } = await supabase.rpc("edit_post_comment", {
-          p_user_id: user.id,
-          p_comment_id: editing.id,
-          p_content: text.trim(),
-        });
-        if (error) throw error;
+        await feedApi.editComment(postId, editing.id, text.trim(), !!pageMode);
         await recordFromText(text.trim(), {
           sourceType: "comment",
           sourceId: editing.id,
@@ -136,15 +128,7 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
         });
         toast.success("Comment updated");
       } else {
-        const rpcName: "add_page_post_comment" | "add_post_comment" =
-          pageMode ? "add_page_post_comment" : "add_post_comment";
-        const { data: newId, error } = await supabase.rpc(rpcName, {
-          p_user_id: user.id,
-          p_post_id: postId,
-          p_content: text.trim(),
-          p_parent_id: replyTo?.id ?? undefined,
-        });
-        if (error) throw error;
+        const { id: newId } = await feedApi.addComment(postId, text.trim(), replyTo?.id ?? null, !!pageMode);
         if (typeof newId === "string") {
           await recordFromText(text.trim(), {
             sourceType: "comment",
@@ -160,7 +144,7 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
       await fetchComments();
       setTimeout(() => listRef.current?.scrollTo(0, listRef.current.scrollHeight), 100);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to send");
+      toast.error(apiErrorMessage(e, "Failed to send"));
     } finally {
       setSending(false);
     }
@@ -169,34 +153,12 @@ export default function CommentSheet({ postId, open, onOpenChange, onCommentAdde
   const handleDelete = async (c: Comment) => {
     if (!user || c.user_id !== user.id) return;
     if (!window.confirm("Delete this comment?")) return;
-    const { error } = await supabase.from("post_comments").delete().eq("id", c.id);
-    if (error) { toast.error("Couldn't delete"); return; }
-    if (postId) {
-      if (pageMode) {
-        const { data } = await supabase
-          .from("page_posts")
-          .select("comments_count")
-          .eq("id", postId)
-          .maybeSingle();
-        if (data) {
-          await supabase
-            .from("page_posts")
-            .update({ comments_count: Math.max((data.comments_count || 1) - 1, 0) })
-            .eq("id", postId);
-        }
-      } else {
-        const { data } = await supabase
-          .from("posts")
-          .select("comments_count")
-          .eq("id", postId)
-          .maybeSingle();
-        if (data) {
-          await supabase
-            .from("posts")
-            .update({ comments_count: Math.max((data.comments_count || 1) - 1, 0) })
-            .eq("id", postId);
-        }
-      }
+    try {
+      // The server removes the replies too and keeps the post's comment count right.
+      await feedApi.deleteComment(postId!, c.id, !!pageMode);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't delete"));
+      return;
     }
     fetchComments();
   };

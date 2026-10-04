@@ -24,6 +24,8 @@ export async function signup(input: {
   password: string;
   username?: string;
   displayName?: string;
+  /** Referral code captured from the invite link; the server pays the referrer. */
+  referralCode?: string;
 }) {
   const { data } = await apiClient.post<AuthResponse>("/auth/signup", input);
   setAccessToken(data.accessToken);
@@ -46,8 +48,9 @@ export async function fetchMe(): Promise<Me> {
   return data;
 }
 
-export async function forgotPassword(email: string) {
-  const { data } = await apiClient.post("/auth/forgot-password", { email });
+/** `phone` is only needed when the server has REQUIRE_PHONE_FOR_RESET on and the account has a phone number saved. */
+export async function forgotPassword(email: string, phone?: string) {
+  const { data } = await apiClient.post("/auth/forgot-password", { email, ...(phone ? { phone } : {}) });
   return data;
 }
 

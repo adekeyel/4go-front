@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as feedApi from "@/api/feed";
+import * as pagesApi from "@/api/pages";
 import PostCard, { FeedPost } from "./PostCard";
 import PagePostCard, { PagePostCardData } from "@/components/pages/PagePostCard";
 import CommentSheet from "./CommentSheet";
@@ -48,76 +49,14 @@ export default function FeedSection({ preview = false }: FeedSectionProps) {
     const pageSize = preview ? PREVIEW_PAGE_SIZE : PAGE_FEED_SIZE;
 
     try {
-      if (user) {
-        const [userRes, pageRes] = await Promise.all([
-          supabase.rpc("get_feed_posts", {
-            p_user_id: user.id,
-            p_limit: userSize,
-            p_offset: offset,
-          }),
-          supabase.rpc("get_page_feed", {
-            p_user_id: user.id,
-            p_limit: pageSize,
-            p_offset: offset,
-          }),
-        ]);
-        if (userRes.error) throw userRes.error;
-        const fetched = (userRes.data || []) as unknown as FeedPost[];
-        const fetchedPages = (pageRes.data || []) as unknown as PagePostCardData[];
-        setPosts((prev) => (append ? [...prev, ...fetched] : fetched));
-        setPagePosts((prev) => (append ? [...prev, ...fetchedPages] : fetchedPages));
-        setHasMore(!preview && (fetched.length === userSize || fetchedPages.length === pageSize));
-      } else {
-        // Guest mode: simple public feed (no personalization, no like state)
-        const { data: rows, error } = await supabase
-          .from("posts")
-          .select("id, user_id, content, image_url, likes_count, comments_count, created_at")
-          .order("created_at", { ascending: false })
-          .range(offset, offset + userSize - 1);
-        if (error) throw error;
-        const ids = (rows || []).map((r) => r.user_id);
-        const { data: profs } = ids.length
-          ? await supabase
-              .from("profiles")
-              .select("user_id, display_name, username, avatar_url, rank")
-              .in("user_id", ids)
-          : { data: [] as { user_id: string; display_name: string | null; username: string | null; avatar_url: string | null; rank: string }[] };
-        const profMap = new Map((profs || []).map((p) => [p.user_id, p]));
-        const fetched: FeedPost[] = (rows || []).map((p) => ({
-          ...p,
-          display_name: profMap.get(p.user_id)?.display_name ?? null,
-          username: profMap.get(p.user_id)?.username ?? null,
-          avatar_url: profMap.get(p.user_id)?.avatar_url ?? null,
-          rank: profMap.get(p.user_id)?.rank ?? null,
-          is_liked: false,
-          feed_score: 0,
-        }));
-
-        // Guest page posts (public)
-        const { data: pageRows } = await supabase
-          .from("page_posts")
-          .select("id, page_id, author_id, content, media_url, media_type, views_count, unique_views_count, likes_count, comments_count, saves_count, created_at")
-          .order("created_at", { ascending: false })
-          .range(offset, offset + pageSize - 1);
-        const pageIds = (pageRows || []).map((r) => r.page_id);
-        const { data: pageMeta } = pageIds.length
-          ? await supabase.from("pages").select("id, name, profile_image").in("id", pageIds)
-          : { data: [] as { id: string; name: string; profile_image: string | null }[] };
-        const pageMap = new Map((pageMeta || []).map((p) => [p.id, p]));
-        const fetchedPages: PagePostCardData[] = (pageRows || []).map((p) => ({
-          ...p,
-          page_name: pageMap.get(p.page_id)?.name ?? null,
-          page_avatar: pageMap.get(p.page_id)?.profile_image ?? null,
-          is_followed: false,
-          is_boosted: false,
-          is_saved: false,
-          is_liked: false,
-        }));
-
-        setPosts((prev) => (append ? [...prev, ...fetched] : fetched));
-        setPagePosts((prev) => (append ? [...prev, ...fetchedPages] : fetchedPages));
-        setHasMore(!preview && (fetched.length === userSize || fetchedPages.length === pageSize));
-      }
+      // Signed-in users get the ranked feeds. Guests get the newest public posts (the page-post feed needs an account).
+      const [fetched, fetchedPages] = await Promise.all([
+        feedApi.listFeed(userSize, offset),
+        user ? pagesApi.listPageFeed(pageSize, offset).catch(() => []) : Promise.resolve([]),
+      ]);
+      setPosts((prev) => (append ? [...prev, ...fetched] : fetched));
+      setPagePosts((prev) => (append ? [...prev, ...fetchedPages] : fetchedPages));
+      setHasMore(!preview && (fetched.length === userSize || fetchedPages.length === pageSize));
     } catch {
       // silent
     } finally {
@@ -180,45 +119,7 @@ export default function FeedSection({ preview = false }: FeedSectionProps) {
 
     (async () => {
       try {
-        const { data: postRow, error } = await supabase
-          .from("posts")
-          .select("*")
-          .eq("id", targetPostId)
-          .maybeSingle();
-        if (error || !postRow) return;
-
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("display_name, username, avatar_url, rank")
-          .eq("user_id", postRow.user_id)
-          .maybeSingle();
-
-        let isLiked = false;
-        if (user) {
-          const { data: likeRow } = await supabase
-            .from("post_likes")
-            .select("id")
-            .eq("post_id", targetPostId)
-            .eq("user_id", user.id)
-            .maybeSingle();
-          isLiked = !!likeRow;
-        }
-
-        const enriched: FeedPost = {
-          id: postRow.id,
-          user_id: postRow.user_id,
-          content: postRow.content,
-          image_url: postRow.image_url,
-          likes_count: postRow.likes_count,
-          comments_count: postRow.comments_count,
-          created_at: postRow.created_at,
-          display_name: profile?.display_name ?? null,
-          username: profile?.username ?? null,
-          avatar_url: profile?.avatar_url ?? null,
-          rank: profile?.rank ?? null,
-          is_liked: isLiked,
-          feed_score: 0,
-        };
+        const enriched = await feedApi.getPost(targetPostId);
 
         setPosts((prev) =>
           prev.some((p) => p.id === enriched.id) ? prev : [enriched, ...prev]

@@ -66,3 +66,13 @@ apiClient.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+/** Readable message from a failed API call: the backend's `{ error }` text when present. */
+export function apiErrorMessage(err: unknown, fallback = "Something went wrong"): string {
+  if (axios.isAxiosError(err)) {
+    const m = err.response?.data?.error;
+    if (typeof m === "string" && m) return m;
+    return fallback;
+  }
+  return err instanceof Error && err.message ? err.message : fallback;
+}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { getLeaderboard } from "@/api/profiles";
 import { ArrowLeft, Trophy, Clock, Crown } from "lucide-react";
 import { RankBadge } from "@/components/RankBadge";
 import BottomNav from "@/components/BottomNav";
@@ -22,12 +22,8 @@ export default function LeaderboardPage() {
 
   useEffect(() => {
     const fetchLeaderboard = async () => {
-      const { data } = await supabase
-        .from("profiles")
-        .select("user_id, display_name, username, avatar_url, rank, total_online_minutes, is_monetized")
-        .order("total_online_minutes", { ascending: false })
-        .limit(50);
-      setUsers(data || []);
+      const data = await getLeaderboard(50).catch(() => []);
+      setUsers(data as unknown as LeaderboardUser[]);
       setLoading(false);
     };
     fetchLeaderboard();

@@ -82,12 +82,10 @@ export default function PremiumPage() {
       toast.error("Add an email to your account first");
       return;
     }
-    const amount = planKey === "yearly" ? 24000 : 2500;
     setBusyPlan(planKey);
     let data: { link: string } | null = null;
     try {
       data = await walletApi.initiatePayment({
-        amount,
         purpose: "premium",
         plan: planKey,
         redirectUrl: window.location.origin + "/premium",

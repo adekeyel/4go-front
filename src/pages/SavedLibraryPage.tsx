@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
 import { useAuth } from "@/contexts/AuthContext";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ArrowLeft, Bookmark } from "lucide-react";
@@ -20,27 +20,8 @@ export default function SavedLibraryPage() {
   const load = async () => {
     if (!user) return;
     setLoading(true);
-    const { data: saves } = await supabase
-      .from("post_saves")
-      .select("post_id, saved_at")
-      .eq("user_id", user.id)
-      .order("saved_at", { ascending: false });
-    const ids = (saves ?? []).map((s) => s.post_id);
-    if (ids.length === 0) { setItems([]); setLoading(false); return; }
-    const { data: posts } = await supabase.from("page_posts").select("*").in("id", ids);
-    const pageIds = Array.from(new Set((posts ?? []).map((p) => p.page_id)));
-    const { data: pages } = await supabase.from("pages").select("id, name, profile_image").in("id", pageIds);
-    const pageMap = new Map<string, { id: string; name: string; profile_image: string | null }>();
-    (pages ?? []).forEach((p) => pageMap.set(p.id, p));
-    const merged: PagePostCardData[] = (posts ?? []).map((p) => ({
-      ...p,
-      page_name: pageMap.get(p.page_id)?.name ?? null,
-      page_avatar: pageMap.get(p.page_id)?.profile_image ?? null,
-      is_saved: true,
-    }));
-    // preserve save order
-    const order = new Map(ids.map((id, i) => [id, i]));
-    merged.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    // Newest save first, with page name/avatar and your like state attached.
+    const merged = (await pagesApi.listSavedPagePosts().catch(() => [])).map((p) => ({ ...p, is_saved: true }));
     setItems(merged);
     setLoading(false);
   };

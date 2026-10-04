@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { getProfile } from "@/api/profiles";
+import { useSocket } from "@/sockets/SocketContext";
 import UserAvatar from "./UserAvatar";
 import { RankBadge } from "./RankBadge";
 import VerifiedBadge from "./VerifiedBadge";
@@ -28,6 +29,7 @@ interface ProfileData {
 }
 
 export default function UserProfilePreview({ userId, open, onOpenChange }: UserProfilePreviewProps) {
+  const socket = useSocket();
   const [profile, setProfile] = useState<ProfileData | null>(null);
   const [loading, setLoading] = useState(false);
   const [showFullImage, setShowFullImage] = useState(false);
@@ -35,30 +37,29 @@ export default function UserProfilePreview({ userId, open, onOpenChange }: UserP
   useEffect(() => {
     if (!userId || !open) return;
     setLoading(true);
-    const fetchProfile = () => supabase
-      .from("profiles")
-      .select("display_name, username, avatar_url, bio, rank, is_online, total_online_minutes, is_premium, is_verified")
-      .eq("user_id", userId)
-      .single()
-      .then(({ data }) => {
-        setProfile(data as ProfileData | null);
+    let cancelled = false;
+    getProfile(userId)
+      .then((data) => {
+        if (cancelled) return;
+        setProfile(data as unknown as ProfileData);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setProfile(null);
         setLoading(false);
       });
-    fetchProfile();
-    const channel = supabase
-      .channel(`profile-preview-${userId}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "profiles", filter: `user_id=eq.${userId}` },
-        (payload) => {
-          setProfile((prev) => ({ ...(prev as ProfileData), ...(payload.new as ProfileData) }));
-        },
-      )
-      .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
+    // Online/offline changes arrive on the backend's presence socket event.
+    const onPresence = (p: { userId: string; online: boolean }) => {
+      if (p.userId !== userId) return;
+      setProfile((prev) => (prev ? { ...prev, is_online: p.online } : prev));
     };
-  }, [userId, open]);
+    socket?.on("presence:update", onPresence);
+    return () => {
+      cancelled = true;
+      socket?.off("presence:update", onPresence);
+    };
+  }, [userId, open, socket]);
 
   useEffect(() => {
     if (!open) setShowFullImage(false);

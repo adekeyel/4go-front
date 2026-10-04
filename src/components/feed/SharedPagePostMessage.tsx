@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Rocket } from "lucide-react";
 
@@ -38,26 +38,20 @@ export default function SharedPagePostMessage({ raw }: Props) {
     }
     setNote(n);
     (async () => {
-      const { data } = await supabase
-        .from("page_posts")
-        .select("id, page_id, content, media_url, media_type")
-        .eq("id", postId)
-        .maybeSingle();
-      if (!data) { setMissing(true); return; }
-      const { data: page } = await supabase
-        .from("pages")
-        .select("name, profile_image")
-        .eq("id", data.page_id)
-        .maybeSingle();
-      setPost({
-        id: data.id,
-        page_id: data.page_id,
-        content: data.content,
-        media_url: data.media_url,
-        media_type: data.media_type,
-        page_name: page?.name ?? null,
-        page_avatar: page?.profile_image ?? null,
-      });
+      try {
+        const data = await pagesApi.getPagePost(postId);
+        setPost({
+          id: data.id,
+          page_id: data.page_id,
+          content: data.content,
+          media_url: data.media_url,
+          media_type: data.media_type,
+          page_name: data.page_name ?? null,
+          page_avatar: data.page_avatar ?? null,
+        });
+      } catch {
+        setMissing(true);
+      }
     })();
   }, [raw]);
 

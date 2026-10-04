@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as statusesApi from "@/api/statuses";
+import * as roomsApi from "@/api/rooms";
+import * as messagesApi from "@/api/messages";
+import { uploadFile } from "@/api/uploads";
+import { apiErrorMessage } from "@/lib/apiError";
+import { useSocket } from "@/sockets/SocketContext";
 import { useAuth } from "@/contexts/AuthContext";
 import BottomNav from "@/components/BottomNav";
 import UserAvatar from "@/components/UserAvatar";
@@ -32,6 +37,10 @@ type StatusRow = {
   text_content: string | null;
   created_at: string;
   expires_at: string;
+  my_reaction?: string | null;
+  view_count?: number;
+  reaction_count?: number;
+  profile?: ProfileLite;
 };
 
 type ProfileLite = {
@@ -74,18 +83,14 @@ export default function StatusPage() {
   const fetchAll = useCallback(async () => {
     if (!user) return;
     setLoading(true);
-    // Get all viewable statuses (RLS filters to friends + self, non-expired)
-    const { data: statuses } = await supabase
-      .from("statuses")
-      .select("*")
-      .order("created_at", { ascending: true });
-
-    const list = (statuses as StatusRow[] | null) || [];
-    const userIds = Array.from(new Set(list.map((s) => s.user_id)));
-    const { data: profs } = userIds.length
-      ? await supabase.from("profiles").select("user_id, display_name, username, avatar_url").in("user_id", userIds)
-      : { data: [] as ProfileLite[] };
-    const profMap = new Map((profs || []).map((p) => [p.user_id, p as ProfileLite]));
+    // Your own and your friends' unexpired statuses. The server sends newest first; the viewer plays oldest first.
+    let list: StatusRow[] = [];
+    try {
+      list = ((await statusesApi.listStatuses()) as StatusRow[]).slice().reverse();
+    } catch {
+      /* show an empty list; pull-to-refresh retries */
+    }
+    const profMap = new Map<string, ProfileLite>(list.filter((s) => s.profile).map((s) => [s.user_id, s.profile as ProfileLite]));
 
     const grouped = new Map<string, Group>();
     for (const s of list) {
@@ -114,21 +119,16 @@ export default function StatusPage() {
   }, [fetchAll]);
 
   // Realtime: reflect new posts and deletes immediately for everyone viewing.
+  const socket = useSocket();
   useEffect(() => {
-    if (!user) return;
-    const ch = supabase
-      .channel("status-page-feed")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "statuses" },
-        () => void fetchAll()
-      )
-      .subscribe();
+    if (!socket) return;
+    const refresh = () => void fetchAll();
+    socket.on("status:changed", refresh);
     return () => {
-      void supabase.removeChannel(ch);
+      socket.off("status:changed", refresh);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, [socket, user?.id]);
 
   const myGroup: Group | null = useMemo(
     () =>
@@ -296,33 +296,16 @@ function StatusComposer({ open, onClose, onCreated }: { open: boolean; onClose: 
       if (tab === "text") {
         const text = textContent.trim();
         if (!text) { toast.error("Write something first"); setSubmitting(false); return; }
-        const { error } = await supabase.from("statuses").insert({
-          user_id: user.id,
-          type: "text",
-          text_content: text,
-          bg_color: bgColor,
-        });
-        if (error) throw error;
+        await statusesApi.createStatus({ type: "text", text_content: text, bg_color: bgColor });
       } else {
         if (!file) { toast.error("Select a file"); setSubmitting(false); return; }
-        const ext = file.name.split(".").pop() || (tab === "video" ? "mp4" : "jpg");
-        const path = `${user.id}/${Date.now()}.${ext}`;
-        const { error: upErr } = await supabase.storage.from("statuses").upload(path, file, { upsert: false, contentType: file.type });
-        if (upErr) throw upErr;
-        const { data: urlData } = supabase.storage.from("statuses").getPublicUrl(path);
-        const { error } = await supabase.from("statuses").insert({
-          user_id: user.id,
-          type: tab,
-          media_url: urlData.publicUrl,
-          caption: caption.trim() || null,
-        });
-        if (error) throw error;
+        const { url } = await uploadFile(file, "statuses");
+        await statusesApi.createStatus({ type: tab, media_url: url, caption: caption.trim() || null });
       }
       toast.success("Status posted");
       onCreated();
     } catch (err) {
-      const e = err as Error;
-      toast.error(e.message || "Couldn't post status");
+      toast.error(apiErrorMessage(err, "Couldn't post status"));
     } finally {
       setSubmitting(false);
     }
@@ -466,40 +449,42 @@ function StatusViewer({
   // Record view
   useEffect(() => {
     if (!current || !user || isMine) return;
-    void supabase.from("status_views").insert({ status_id: current.id, viewer_id: user.id });
+    void statusesApi.recordStatusView(current.id).catch(() => {});
     // current/user are derived each render; their .id fields (already in deps)
     // are what should actually trigger a new view record.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id, user?.id, isMine]);
 
-  // Load reactions for current status + realtime
+  // Reactions for the current status. Your own status: everyone's reactions (author-only endpoint), kept live by
+  // socket events. Someone else's status: just your own reaction, which the status list already carries.
+  const socket = useSocket();
   useEffect(() => {
-    if (!current) return;
+    if (!current || !user) return;
     let cancelled = false;
+    if (!isMine) {
+      setReactions(current.my_reaction ? [{ user_id: user.id, emoji: current.my_reaction }] : []);
+      return;
+    }
     const load = async () => {
-      const { data } = await supabase
-        .from("status_reactions")
-        .select("user_id, emoji")
-        .eq("status_id", current.id);
-      if (!cancelled) setReactions((data as { user_id: string; emoji: string }[]) || []);
+      try {
+        const rows = await statusesApi.listStatusViewers(current.id);
+        if (!cancelled) setReactions(rows.filter((r) => r.emoji).map((r) => ({ user_id: r.viewer.user_id, emoji: r.emoji as string })));
+      } catch {
+        /* keep what we have */
+      }
     };
     void load();
-    const ch = supabase
-      .channel(`status-reactions-${current.id}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "status_reactions", filter: `status_id=eq.${current.id}` },
-        () => void load()
-      )
-      .subscribe();
+    socket?.emit("status:join", current.id);
+    const onReaction = (ev: { statusId: string }) => { if (ev.statusId === current.id) void load(); };
+    socket?.on("status:reaction", onReaction);
     return () => {
       cancelled = true;
-      void supabase.removeChannel(ch);
+      socket?.off("status:reaction", onReaction);
+      socket?.emit("status:leave", current.id);
     };
-    // current is derived each render; current?.id (already in deps) is the
-    // actual trigger for re-subscribing to this status's reactions channel.
+    // current is derived each render; current?.id (already in deps) is the actual trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id]);
+  }, [current?.id, socket]);
 
   // Auto-advance
   useEffect(() => {
@@ -533,33 +518,26 @@ function StatusViewer({
 
   const loadViewers = async () => {
     if (!current) return;
-    const { data } = await supabase
-      .from("status_views")
-      .select("viewer_id, viewed_at")
-      .eq("status_id", current.id)
-      .order("viewed_at", { ascending: false });
-    const ids = (data || []).map((d) => d.viewer_id);
-    if (ids.length === 0) { setViewers([]); setViewersOpen(true); return; }
-    const { data: profs } = await supabase.from("profiles").select("user_id, display_name, username, avatar_url").in("user_id", ids);
-    const map = new Map((profs || []).map((p) => [p.user_id, p as ProfileLite]));
-    setViewers(
-      (data || []).map((d) => ({
-        ...(map.get(d.viewer_id) || { user_id: d.viewer_id, display_name: null, username: null, avatar_url: null }),
-        viewed_at: d.viewed_at,
-      }))
-    );
-    setViewersOpen(true);
+    try {
+      const rows = await statusesApi.listStatusViewers(current.id);
+      setViewers(rows.map((r) => ({ ...r.viewer, viewed_at: r.viewed_at })));
+      setViewersOpen(true);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't load viewers"));
+    }
   };
 
   const deleteStatus = async () => {
     if (!current) return;
     setDeleting(true);
-    const { error } = await supabase.from("statuses").delete().eq("id", current.id);
-    setDeleting(false);
-    if (error) {
+    try {
+      await statusesApi.deleteStatus(current.id);
+    } catch {
+      setDeleting(false);
       toast.error("Couldn't delete");
       return;
     }
+    setDeleting(false);
     toast.success("Status deleted");
     setConfirmDelete(false);
     onDeleted();
@@ -569,44 +547,37 @@ function StatusViewer({
 
   const toggleReaction = async (emoji: string) => {
     if (!current || !user || isMine) return;
-    if (myReaction === emoji) {
-      await supabase.from("status_reactions").delete().eq("status_id", current.id).eq("user_id", user.id);
-    } else {
-      await supabase
-        .from("status_reactions")
-        .upsert({ status_id: current.id, user_id: user.id, emoji }, { onConflict: "status_id,user_id" });
+    const previous = reactions;
+    try {
+      if (myReaction === emoji) {
+        setReactions((r) => r.filter((x) => x.user_id !== user.id));
+        await statusesApi.removeStatusReaction(current.id);
+      } else {
+        setReactions((r) => [...r.filter((x) => x.user_id !== user.id), { user_id: user.id, emoji }]);
+        await statusesApi.reactToStatus(current.id, emoji);
+      }
+    } catch {
+      setReactions(previous);
+      toast.error("Couldn't send reaction");
     }
   };
 
   const loadReactors = async () => {
     if (!current) return;
-    const { data } = await supabase
-      .from("status_reactions")
-      .select("user_id, emoji")
-      .eq("status_id", current.id);
-    const list = (data as { user_id: string; emoji: string }[]) || [];
-    if (list.length === 0) { setReactors([]); setReactionsOpen(true); return; }
-    const ids = list.map((r) => r.user_id);
-    const { data: profs } = await supabase.from("profiles").select("user_id, display_name, username, avatar_url").in("user_id", ids);
-    const map = new Map((profs || []).map((p) => [p.user_id, p as ProfileLite]));
-    setReactors(
-      list.map((r) => ({
-        ...(map.get(r.user_id) || { user_id: r.user_id, display_name: null, username: null, avatar_url: null }),
-        emoji: r.emoji,
-      }))
-    );
-    setReactionsOpen(true);
+    try {
+      const rows = await statusesApi.listStatusViewers(current.id);
+      setReactors(rows.filter((r) => r.emoji).map((r) => ({ ...r.viewer, emoji: r.emoji as string })));
+      setReactionsOpen(true);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't load reactions"));
+    }
   };
 
   const sendReply = async () => {
     if (!current || !user || !replyText.trim() || isMine) return;
     setSendingReply(true);
     try {
-      const { data: roomId, error: rErr } = await supabase.rpc("get_or_create_dm_room", {
-        user1_id: user.id,
-        user2_id: group.profile.user_id,
-      });
-      if (rErr || !roomId) throw rErr || new Error("Couldn't open chat");
+      const room = await roomsApi.getOrCreateDmRoom(group.profile.user_id);
       const quote =
         current.type === "text"
           ? `"${(current.text_content || "").slice(0, 120)}"`
@@ -614,17 +585,11 @@ function StatusViewer({
           ? `"${current.caption.slice(0, 120)}"`
           : `[${current.type} status]`;
       const body = `↩️ Replying to status ${quote}\n\n${replyText.trim()}`;
-      const { error: mErr } = await supabase.from("messages").insert({
-        room_id: roomId,
-        sender_id: user.id,
-        type: "text",
-        content: body,
-      });
-      if (mErr) throw mErr;
+      await messagesApi.sendMessage(room.id, { type: "text", content: body });
       toast.success("Reply sent");
       setReplyText("");
     } catch (e) {
-      toast.error((e as Error).message || "Couldn't send reply");
+      toast.error(apiErrorMessage(e, "Couldn't send reply"));
     } finally {
       setSendingReply(false);
     }

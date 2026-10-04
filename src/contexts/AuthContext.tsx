@@ -4,6 +4,7 @@ import { apiClient, setSessionExpiredHandler } from "@/lib/apiClient";
 import { setAccessToken } from "@/lib/tokenStore";
 import { Tables } from "@/integrations/supabase/types";
 import { usePresence } from "@/hooks/usePresence";
+import { unregisterPushDevice } from "@/lib/pushDevice";
 
 type Profile = Tables<"profiles">;
 
@@ -22,7 +23,7 @@ interface AuthContextType {
   profile: Profile | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (input: { email: string; password: string; username?: string; displayName?: string }) => Promise<void>;
+  signUp: (input: { email: string; password: string; username?: string; displayName?: string; referralCode?: string }) => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -102,13 +103,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     applyMe(me, data.accessToken);
   }, [applyMe]);
 
-  const signUp = useCallback(async (input: { email: string; password: string; username?: string; displayName?: string }) => {
+  const signUp = useCallback(async (input: { email: string; password: string; username?: string; displayName?: string; referralCode?: string }) => {
     const data = await authApi.signup(input);
     const me = await authApi.fetchMe();
     applyMe(me, data.accessToken);
   }, [applyMe]);
 
   const signOut = useCallback(async () => {
+    await unregisterPushDevice(); // before the token is gone, so this phone stops getting the old account's pushes
     await authApi.logout().catch(() => {});
     clearSession();
   }, [clearSession]);

@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
+import { uploadFile } from "@/api/uploads";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import MentionTextarea from "@/components/MentionTextarea";
@@ -53,20 +55,10 @@ export default function PagePostComposer({ pageId, onPosted }: Props) {
       let mediaUrl: string | null = null;
       let mediaType: "text" | "image" | "video" = "text";
       if (file) {
-        const ext = file.name.split(".").pop();
-        const path = `pages/${pageId}/${Date.now()}.${ext}`;
-        const { error: upErr } = await supabase.storage.from("chat-media").upload(path, file, { contentType: file.type, upsert: true });
-        if (upErr) throw upErr;
-        mediaUrl = supabase.storage.from("chat-media").getPublicUrl(path).data.publicUrl;
+        mediaUrl = (await uploadFile(file, `pages/${pageId}`)).url;
         mediaType = type;
       }
-      const { data, error } = await supabase
-        .from("page_posts")
-        .insert({ page_id: pageId, author_id: user.id, content: content.trim() || null, media_url: mediaUrl, media_type: mediaType })
-        .select("id")
-        .single();
-      if (error) throw error;
-      const newId = data.id;
+      const { id: newId } = await pagesApi.createPagePost(pageId, { content: content.trim() || null, media_url: mediaUrl, media_type: mediaType });
       if (content.trim()) {
         await recordFromText(content.trim(), {
           sourceType: "post",
@@ -78,7 +70,7 @@ export default function PagePostComposer({ pageId, onPosted }: Props) {
       toast.success("Post published!");
       onPosted(newId);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to publish");
+      toast.error(apiErrorMessage(e, "Failed to publish"));
     } finally { setBusy(false); }
   };
 

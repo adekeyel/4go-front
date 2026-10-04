@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, BadgeCheck, Check, Loader2, Shield, ShieldAlert, Star } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
+import { apiErrorMessage } from "@/lib/apiError";
 import { Button } from "@/components/ui/button";
 import BottomNav from "@/components/BottomNav";
 import VerifiedIdentityBadge from "@/components/VerifiedIdentityBadge";
@@ -38,16 +39,17 @@ export default function VerificationPage() {
       return;
     }
     setVerifying(true);
-    void supabase.functions
-      .invoke("verify-payment", { body: { transactionId, userId: user.id } })
-      .then(({ data, error }) => {
-        if (error || !data?.success) {
+    void walletApi
+      .verifyPayment(transactionId)
+      .then((data) => {
+        if (!data?.success) {
           toast.error("Couldn't verify payment");
         } else {
           toast.success("Application submitted — under review");
           void refresh();
         }
       })
+      .catch((err) => toast.error(apiErrorMessage(err, "Couldn't verify payment")))
       .finally(() => {
         setVerifying(false);
         window.history.replaceState({}, "", "/verification");
@@ -64,27 +66,19 @@ export default function VerificationPage() {
       toast.error("Only Professional rank or higher can apply");
       return;
     }
-    const email = user.email || (profile?.username ? profile.username + "@4go.com.ng" : null);
-    if (!email) {
-      toast.error("Add an email to your account first");
-      return;
-    }
     setBusy(true);
-    const { data, error } = await supabase.functions.invoke("create-payment", {
-      body: {
-        amount: FEE_NGN,
-        email,
-        userId: user.id,
+    try {
+      // The server prices this and checks you're eligible BEFORE any money moves; its message says why if not.
+      const data = await walletApi.initiatePayment({
         purpose: "verification",
         redirectUrl: window.location.origin + "/verification",
-      },
-    });
-    setBusy(false);
-    if (error || !data?.link) {
-      toast.error("Couldn't start checkout");
-      return;
+      });
+      if (!data?.link) throw new Error("no link");
+      window.location.href = data.link;
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't start checkout"));
+      setBusy(false);
     }
-    window.location.href = data.link;
   };
 
   const statusLabel = (() => {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -35,15 +35,10 @@ export default function PagesListPage() {
     setLoading(true);
     if (tab === "yours") {
       if (!user) { setPages([]); setLoading(false); return; }
-      const { data } = await supabase.from("pages").select("*").eq("owner_id", user.id).order("created_at", { ascending: false });
-      setPages((data ?? []) as Page[]);
+      setPages((await pagesApi.listPages({ owner: "me", limit: 50 }).catch(() => [])) as Page[]);
     } else if (tab === "following") {
       if (!user) { setPages([]); setLoading(false); return; }
-      const { data: follows } = await supabase.from("page_followers").select("page_id").eq("user_id", user.id);
-      const ids = (follows ?? []).map((f) => f.page_id);
-      if (ids.length === 0) { setPages([]); setLoading(false); return; }
-      const { data } = await supabase.from("pages").select("*").in("id", ids);
-      setPages((data ?? []) as Page[]);
+      setPages((await pagesApi.listFollowingPages().catch(() => [])) as Page[]);
     }
     setLoading(false);
   };

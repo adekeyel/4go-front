@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as friendsApi from "@/api/friends";
+import * as roomsApi from "@/api/rooms";
+import * as feedApi from "@/api/feed";
+import * as pagesApi from "@/api/pages";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -43,35 +46,11 @@ export default function SharePostDialog({ postId, postPreview, open, onOpenChang
     setSelected(new Set());
     setNote("");
     (async () => {
-      // Friends
-      const { data: friendRows } = await supabase
-        .from("friends")
-        .select("requester_id, addressee_id")
-        .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`)
-        .eq("status", "accepted");
-      const friendIds = (friendRows || []).map((f) =>
-        f.requester_id === user.id ? f.addressee_id : f.requester_id
-      );
-      const { data: friendProfiles } = friendIds.length
-        ? await supabase
-            .from("profiles")
-            .select("user_id, display_name, username, avatar_url")
-            .in("user_id", friendIds)
-        : { data: [] as { user_id: string; display_name: string | null; username: string | null; avatar_url: string | null }[] };
-
-      // Rooms (non-DM)
-      const { data: memberRows } = await supabase
-        .from("room_members")
-        .select("room_id")
-        .eq("user_id", user.id);
-      const roomIds = (memberRows || []).map((r) => r.room_id);
-      const { data: rooms } = roomIds.length
-        ? await supabase
-            .from("rooms")
-            .select("id, name, avatar_url, type")
-            .in("id", roomIds)
-            .neq("type", "dm")
-        : { data: [] as { id: string; name: string; avatar_url: string | null; type: string }[] };
+      const [friendProfiles, myRooms] = await Promise.all([
+        friendsApi.listFriends().catch(() => []),
+        roomsApi.listMyRooms().catch(() => []),
+      ]);
+      const rooms = myRooms.filter((r) => r.type !== "dm");
 
       const list: ShareTarget[] = [
         ...(friendProfiles || []).map((p) => ({
@@ -120,21 +99,18 @@ export default function SharePostDialog({ postId, postPreview, open, onOpenChang
         if (!t) continue;
         let roomId = t.id;
         if (t.type === "dm") {
-          const { data, error } = await supabase.rpc("get_or_create_dm_room", {
-            user1_id: user.id,
-            user2_id: t.id,
-          });
-          if (error || !data) continue;
-          roomId = data as string;
+          try {
+            roomId = (await roomsApi.getOrCreateDmRoom(t.id)).id;
+          } catch {
+            continue;
+          }
         }
-        const rpcName: "forward_page_post_to_room" | "forward_post_to_room" =
-          pageMode ? "forward_page_post_to_room" : "forward_post_to_room";
-        await supabase.rpc(rpcName, {
-          p_user_id: user.id,
-          p_post_id: postId,
-          p_room_id: roomId,
-          p_note: note || undefined,
-        });
+        try {
+          if (pageMode) await pagesApi.forwardPagePost(postId, roomId, note || undefined);
+          else await feedApi.forwardPost(postId, roomId, note || undefined);
+        } catch {
+          /* one chat refusing (muted, blocked, announcements) shouldn't stop the others */
+        }
       }
       toast.success(`Shared with ${selected.size} ${selected.size === 1 ? "chat" : "chats"}`);
       onOpenChange(false);

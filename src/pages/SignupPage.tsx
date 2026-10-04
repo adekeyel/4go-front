@@ -42,16 +42,14 @@ export default function SignupPage() {
     }
     setLoading(true);
     try {
-      await signUp({ email: email.trim().toLowerCase(), password, displayName: displayName.trim() });
+      const referralCode = localStorage.getItem(REFERRAL_KEY) || undefined;
+      await signUp({ email: email.trim().toLowerCase(), password, displayName: displayName.trim(), referralCode });
+      localStorage.removeItem(REFERRAL_KEY); // the server redeems it once, at signup
 
       // Persist the phone number now that we have a session. Not part of the
       // signup payload itself since the backend's /auth/signup schema (shared
       // with the native app) doesn't take one.
       await apiClient.patch("/profiles/me", { phone_number: phone.trim() }).catch(() => {});
-
-      // NOTE: referral processing (crediting the referrer) hasn't been ported
-      // to the new backend yet — the code is still captured above for when
-      // that lands, it just isn't redeemed here yet.
 
       toast.success("Welcome to 4go 🎉 Check your email to verify your address.");
       navigate("/setup-profile");

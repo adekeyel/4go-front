@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { listMyConversations, createConversation, listSupportMessages, sendSupportMessage, markSupportRead } from "@/api/support";
+import { useSocket } from "@/sockets/SocketContext";
+import { apiErrorMessage } from "@/lib/apiClient";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,80 +29,72 @@ export default function SupportLiveChat() {
   const [sending, setSending] = useState(false);
   const [agentTyping, setAgentTyping] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
-  const typingChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const socket = useSocket();
   const typingTimer = useRef<number | null>(null);
+  const lastTypingSent = useRef(0);
 
   const ensureConversation = useCallback(async () => {
     if (!user) { setLoading(false); return; }
-    const { data: existing } = await supabase
-      .from("support_conversations")
-      .select("id")
-      .eq("user_id", user.id)
-      .order("last_message_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    let convId = existing?.id ?? null;
-    if (!convId) {
-      const { data: created, error } = await supabase
-        .from("support_conversations")
-        .insert({ user_id: user.id, subject: "Support chat" })
-        .select("id")
-        .single();
-      if (error) { toast.error(error.message); setLoading(false); return; }
-      convId = created.id;
+    try {
+      // Your newest conversation, if any. A new one is only created with your first message.
+      const [existing] = await listMyConversations();
+      if (existing) {
+        setConversationId(existing.id);
+        setMessages(await listSupportMessages(existing.id));
+        if (existing.unread_for_user > 0) void markSupportRead(existing.id).catch(() => undefined);
+      }
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't load your chat"));
     }
-    setConversationId(convId);
-    const { data: msgs } = await supabase
-      .from("support_messages")
-      .select("*")
-      .eq("conversation_id", convId)
-      .order("created_at", { ascending: true });
-    setMessages((msgs || []) as Msg[]);
     setLoading(false);
-    if (existing) {
-      await supabase.from("support_conversations").update({ unread_for_user: 0 }).eq("id", convId);
-    }
   }, [user]);
 
   useEffect(() => { void ensureConversation(); }, [ensureConversation]);
 
   useEffect(() => {
     if (!conversationId) return;
-    const ch = supabase
-      .channel(`support-chat-${conversationId}`)
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "support_messages", filter: `conversation_id=eq.${conversationId}` },
-        (payload) => {
-          const m = payload.new as Msg;
-          if (m.is_agent) setAgentTyping(false);
-          setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
-        },
-      )
-      .subscribe();
-
-    const typingCh = supabase
-      .channel(`support-typing-${conversationId}`)
-      .on("broadcast", { event: "typing" }, (payload) => {
-        if (!payload.payload?.is_agent) return;
-        setAgentTyping(true);
-        if (typingTimer.current) window.clearTimeout(typingTimer.current);
-        typingTimer.current = window.setTimeout(() => setAgentTyping(false), 3000);
-      })
-      .subscribe();
-    typingChannelRef.current = typingCh;
+    let cancelled = false;
+    const reload = async () => {
+      try {
+        const msgs = await listSupportMessages(conversationId);
+        if (cancelled) return;
+        setMessages(msgs);
+        if (msgs.some((m) => m.is_agent)) setAgentTyping(false);
+        void markSupportRead(conversationId).catch(() => undefined);
+      } catch {
+        /* keep what we have */
+      }
+    };
+    // The server notifies (without the text) when an agent replies; fetch the new messages.
+    const onMessage = (ev: { conversationId: string }) => {
+      if (ev.conversationId === conversationId) void reload();
+    };
+    const onTyping = (ev: { conversationId: string; userId: string; typing: boolean }) => {
+      if (ev.conversationId !== conversationId || ev.userId === user?.id) return;
+      if (typingTimer.current) window.clearTimeout(typingTimer.current);
+      setAgentTyping(!!ev.typing);
+      if (ev.typing) typingTimer.current = window.setTimeout(() => setAgentTyping(false), 3000);
+    };
+    socket?.emit("support:join", conversationId);
+    socket?.on("support:message", onMessage);
+    socket?.on("support:typing", onTyping);
 
     return () => {
-      void supabase.removeChannel(ch);
-      void supabase.removeChannel(typingCh);
-      typingChannelRef.current = null;
+      cancelled = true;
+      socket?.emit("support:leave", conversationId);
+      socket?.off("support:message", onMessage);
+      socket?.off("support:typing", onTyping);
     };
-  }, [conversationId]);
+  }, [conversationId, socket, user?.id]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, agentTyping]);
 
   const broadcastTyping = () => {
-    typingChannelRef.current?.send({ type: "broadcast", event: "typing", payload: { is_agent: false } });
+    if (!conversationId) return;
+    const now = Date.now();
+    if (now - lastTypingSent.current < 2000) return; // don't spam the socket on every keystroke
+    lastTypingSent.current = now;
+    socket?.emit("support:typing", { conversationId, typing: true });
   };
 
   const send = async () => {
@@ -108,11 +102,21 @@ export default function SupportLiveChat() {
     setSending(true);
     const body = text.trim();
     setText("");
-    const { error } = await supabase.from("support_messages").insert({
-      conversation_id: conversationId, sender_id: user.id, is_agent: false, content: body,
-    });
+    try {
+      if (!conversationId) {
+        // First message: the server creates the conversation together with it.
+        const created = await createConversation(body, "Support chat");
+        setConversationId(created.conversation.id);
+        setMessages([created.message]);
+      } else {
+        const m = await sendSupportMessage(conversationId, body);
+        setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
+      }
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't send"));
+      setText(body);
+    }
     setSending(false);
-    if (error) { toast.error(error.message); setText(body); }
   };
 
   if (!user) {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as feedApi from "@/api/feed";
 import UserAvatar from "@/components/UserAvatar";
 import ProfileBadges from "@/components/ProfileBadges";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -39,26 +39,20 @@ export default function SharedPostMessage({ raw }: Props) {
     }
     setNote(n);
     (async () => {
-      const { data } = await supabase
-        .from("posts")
-        .select("id, content, image_url, user_id")
-        .eq("id", postId)
-        .maybeSingle();
-      if (!data) { setMissing(true); return; }
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("display_name, username, avatar_url")
-        .eq("user_id", data.user_id)
-        .maybeSingle();
-      setPost({
-        id: data.id,
-        content: data.content,
-        image_url: data.image_url,
-        user_id: data.user_id,
-        display_name: prof?.display_name || null,
-        username: prof?.username || null,
-        avatar_url: prof?.avatar_url || null,
-      });
+      try {
+        const data = await feedApi.getPost(postId);
+        setPost({
+          id: data.id,
+          content: data.content,
+          image_url: data.image_url,
+          user_id: data.user_id,
+          display_name: data.display_name,
+          username: data.username,
+          avatar_url: data.avatar_url,
+        });
+      } catch {
+        setMissing(true); // deleted, or hidden because of a block
+      }
     })();
   }, [raw]);
 

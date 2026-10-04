@@ -1,7 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 import { Bell, X, AlertTriangle, AtSign, Users } from "lucide-react";
 import { Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { useSocket } from "@/sockets/SocketContext";
+import { useUnreadMentions } from "@/hooks/useUnreadMentions";
+import {
+  listNotifications,
+  markNotificationRead,
+  listMyEmployeeNotifications,
+  markEmployeeNotificationsRead,
+} from "@/api/notifications";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -28,7 +35,8 @@ export default function NotificationBell() {
   const { user } = useAuth();
   const [notifications, setNotifications] = useState<GlobalNotification[]>([]);
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
-  const [unreadMentions, setUnreadMentions] = useState(0);
+  const socket = useSocket();
+  const { unreadMentions, setUnreadMentions } = useUnreadMentions();
   const [empNotifs, setEmpNotifs] = useState<EmployeeNotif[]>([]);
   const [open, setOpen] = useState(false);
   const [popup, setPopup] = useState<GlobalNotification | null>(null);
@@ -38,96 +46,42 @@ export default function NotificationBell() {
   useEffect(() => {
     if (!user) return;
 
-    // Fetch existing notifications + reads + unread mentions count
+    let mounted = true;
+
+    // Fetch existing announcements (with per-user read state) and staff notifications.
+    // The unread-mention count is kept by useUnreadMentions.
     const load = async () => {
-      const [notifRes, readsRes, mentionsRes, empRes] = await Promise.all([
-        supabase
-          .from("global_notifications")
-          .select("*")
-          .order("created_at", { ascending: false })
-          .limit(50),
-        supabase
-          .from("notification_reads")
-          .select("notification_id")
-          .eq("user_id", user.id),
-        supabase
-          .from("mentions")
-          .select("id", { count: "exact", head: true })
-          .eq("mentioned_user_id", user.id)
-          .is("read_at", null),
-        supabase
-          .from("employee_notifications")
-          .select("id, title, body, read_at, created_at")
-          .eq("employee_id", user.id)
-          .order("created_at", { ascending: false })
-          .limit(30),
+      const [notifs, emp] = await Promise.all([
+        listNotifications().catch(() => []),
+        listMyEmployeeNotifications(30).catch(() => []),
       ]);
-      setNotifications((notifRes.data as GlobalNotification[]) || []);
-      setReadIds(new Set((readsRes.data || []).map((r) => r.notification_id)));
-      setUnreadMentions(mentionsRes.count ?? 0);
-      setEmpNotifs((empRes.data as EmployeeNotif[]) || []);
+      if (!mounted) return;
+      setNotifications(notifs as GlobalNotification[]);
+      setReadIds(new Set(notifs.filter((n) => n.is_read).map((n) => n.id)));
+      setEmpNotifs(emp as EmployeeNotif[]);
     };
     load();
 
-    // Realtime: new global notifications, new mentions, mention reads
-    const channel = supabase
-      .channel("notif-bell")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "global_notifications" },
-        (payload) => {
-          const newNotif = payload.new as GlobalNotification;
-          setNotifications((prev) => [newNotif, ...prev]);
-          setPopup(newNotif);
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "mentions",
-          filter: `mentioned_user_id=eq.${user.id}`,
-        },
-        () => setUnreadMentions((c) => c + 1)
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "employee_notifications",
-          filter: `employee_id=eq.${user.id}`,
-        },
-        (payload) => {
-          const n = payload.new as EmployeeNotif;
-          setEmpNotifs((prev) => [n, ...prev]);
-          setPopup({ id: n.id, title: n.title, message: n.body, priority: "normal", created_at: n.created_at });
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "mentions",
-          filter: `mentioned_user_id=eq.${user.id}`,
-        },
-        async () => {
-          const { count } = await supabase
-            .from("mentions")
-            .select("id", { count: "exact", head: true })
-            .eq("mentioned_user_id", user.id)
-            .is("read_at", null);
-          setUnreadMentions(count ?? 0);
-        }
-      )
-      .subscribe();
+    // Live: new announcements and staff notifications arrive on the backend socket.
+    const onAnnouncement = (n: GlobalNotification) => {
+      if (!mounted) return;
+      setNotifications((prev) => (prev.some((x) => x.id === n.id) ? prev : [n, ...prev]));
+      setPopup(n);
+    };
+    const onEmployee = (n: EmployeeNotif) => {
+      if (!mounted) return;
+      setEmpNotifs((prev) => [n, ...prev]);
+      setPopup({ id: n.id, title: n.title, message: n.body, priority: "normal", created_at: n.created_at });
+    };
+    socket?.on("notification:new", onAnnouncement);
+    socket?.on("employee:notification", onEmployee);
 
     return () => {
-      supabase.removeChannel(channel);
+      mounted = false;
+      socket?.off("notification:new", onAnnouncement);
+      socket?.off("employee:notification", onEmployee);
     };
-  }, [user]);
+  }, [user, socket]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -147,7 +101,7 @@ export default function NotificationBell() {
   const markAsRead = async (id: string) => {
     if (readIds.has(id) || !user) return;
     setReadIds((prev) => new Set(prev).add(id));
-    await supabase.from("notification_reads").insert({ notification_id: id, user_id: user.id });
+    markNotificationRead(id).catch(() => undefined);
   };
 
   const handleOpen = () => {
@@ -157,8 +111,7 @@ export default function NotificationBell() {
       notifications.forEach((n) => markAsRead(n.id));
       if (unreadEmployee > 0 && user) {
         setEmpNotifs((prev) => prev.map((n) => ({ ...n, read_at: n.read_at ?? new Date().toISOString() })));
-        void (supabase.rpc as never as (n: string, a: object) => Promise<unknown>)
-          .call(supabase, "mark_employee_notifications_read", { p_employee: user.id });
+        markEmployeeNotificationsRead().catch(() => undefined);
       }
     }
   };

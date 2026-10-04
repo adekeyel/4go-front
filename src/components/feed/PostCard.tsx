@@ -1,6 +1,6 @@
 import { useState, forwardRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as feedApi from "@/api/feed";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
@@ -70,12 +70,8 @@ const PostCard = forwardRef<HTMLDivElement, PostCardProps>(function PostCard(
     setLikesCount((c) => c + (newLiked ? 1 : -1));
 
     try {
-      const { data, error } = await supabase.rpc("toggle_post_like", {
-        p_user_id: user.id,
-        p_post_id: post.id,
-      });
-      if (error) throw error;
-      onLikeToggle(post.id, (data as { liked: boolean }).liked);
+      const data = await feedApi.togglePostLike(post.id);
+      onLikeToggle(post.id, data.liked);
     } catch {
       setLiked(!newLiked);
       setLikesCount((c) => c + (newLiked ? -1 : 1));
@@ -86,11 +82,11 @@ const PostCard = forwardRef<HTMLDivElement, PostCardProps>(function PostCard(
 
   const handleDelete = async () => {
     if (!user) return;
-    const { error } = await supabase.from("posts").delete().eq("id", post.id);
-    if (error) {
-      toast.error("Failed to delete post");
-    } else {
+    try {
+      await feedApi.deletePost(post.id);
       onDelete?.(post.id);
+    } catch {
+      toast.error("Failed to delete post");
     }
   };
 
@@ -106,16 +102,14 @@ const PostCard = forwardRef<HTMLDivElement, PostCardProps>(function PostCard(
       return;
     }
     setSavingEdit(true);
-    const { error } = await supabase
-      .from("posts")
-      .update({ content: trimmed, updated_at: new Date().toISOString() })
-      .eq("id", post.id)
-      .eq("user_id", user.id);
-    setSavingEdit(false);
-    if (error) {
+    try {
+      await feedApi.updatePost(post.id, trimmed);
+    } catch {
+      setSavingEdit(false);
       toast.error("Failed to update post");
       return;
     }
+    setSavingEdit(false);
     setSavedContent(trimmed);
     setIsEditing(false);
     toast.success("Post updated");

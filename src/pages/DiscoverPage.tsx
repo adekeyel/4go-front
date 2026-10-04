@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
 import { useAuth } from "@/contexts/AuthContext";
 import * as roomsApi from "@/api/rooms";
 import * as friendsApi from "@/api/friends";
@@ -62,23 +62,18 @@ export default function DiscoverPage() {
     setRooms(enriched.slice(0, 20));
     // "Pages" (business/creator directory) hasn't been ported to the new
     // backend yet — left on Supabase for now, a distinct feature from rooms/chat.
-    const { data: pgs } = await supabase
-      .from("pages")
-      .select("id, name, category, profile_image, followers_count")
-      .order("followers_count", { ascending: false })
-      .limit(20);
-    setTrendingPages(pgs ?? []);
+    setTrendingPages(await pagesApi.listPages({ limit: 20 }).catch(() => []));
   }, []);
 
   const searchAll = useCallback(async (q: string) => {
     const [roomsRes, usersRes, pagesRes] = await Promise.all([
       roomsApi.browseRooms({ types: ["public", "private"], q }).catch(() => []),
       profilesApi.searchProfiles(q).catch(() => []),
-      supabase.from("pages").select("id, name, category, profile_image, followers_count").ilike("name", `%${q}%`).limit(20),
+      pagesApi.listPages({ q, limit: 20 }).catch(() => []),
     ]);
     setRooms(roomsRes);
     setUsers(usersRes);
-    setPages(pagesRes.data || []);
+    setPages(pagesRes);
   }, []);
 
   useEffect(() => {

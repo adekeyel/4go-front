@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -45,49 +46,21 @@ export default function PageProfilePage() {
 
   const load = async () => {
     setLoading(true);
-    const { data: p } = await supabase.from("pages").select("*").eq("id", pageId!).maybeSingle();
-    setPage(p ?? null);
-    if (user && p) {
-      const { data: f } = await supabase
-        .from("page_followers")
-        .select("id")
-        .eq("user_id", user.id)
-        .eq("page_id", pageId!)
-        .maybeSingle();
-      setFollowing(!!f);
-    }
+    // The page comes with is_followed for the signed-in viewer.
+    const p = await pagesApi.getPage(pageId!).catch(() => null);
+    setPage(p);
+    setFollowing(!!p?.is_followed);
     await loadPosts();
     setLoading(false);
   };
 
   const loadFollowers = async () => {
-    const { data: rows } = await supabase
-      .from("page_followers")
-      .select("user_id")
-      .eq("page_id", pageId!)
-      .limit(200);
-    const ids = (rows ?? []).map((r) => r.user_id);
-    if (ids.length === 0) { setFollowers([]); return; }
-    const { data: profs } = await supabase
-      .from("profiles")
-      .select("user_id, display_name, username, avatar_url")
-      .in("user_id", ids);
-    setFollowers(profs ?? []);
+    setFollowers(await pagesApi.listFollowers(pageId!).catch(() => []));
   };
 
   const loadFollowingPages = async () => {
     if (!page) return;
-    const { data: follows } = await supabase
-      .from("page_followers")
-      .select("page_id")
-      .eq("user_id", page.owner_id);
-    const ids = (follows ?? []).map((f) => f.page_id);
-    if (ids.length === 0) { setFollowingPages([]); return; }
-    const { data: pgs } = await supabase
-      .from("pages")
-      .select("id, name, profile_image, category")
-      .in("id", ids);
-    setFollowingPages(pgs ?? []);
+    setFollowingPages(await pagesApi.listOwnerFollowing(page.id).catch(() => []));
   };
 
   useEffect(() => {
@@ -98,42 +71,24 @@ export default function PageProfilePage() {
   }, [tab, page?.id]);
 
   const loadPosts = async () => {
-    const { data } = await supabase
-      .from("page_posts")
-      .select("*")
-      .eq("page_id", pageId!)
-      .order("created_at", { ascending: false });
-    if (!data) { setPosts([]); return; }
-    let savedIds = new Set<string>();
-    if (user) {
-      const { data: saves } = await supabase
-        .from("post_saves")
-        .select("post_id")
-        .eq("user_id", user.id)
-        .in("post_id", data.map((d) => d.id));
-      savedIds = new Set((saves ?? []).map((s) => s.post_id));
-    }
-    setPosts(
-      data.map((d) => ({
-        ...d,
-        page_name: page?.name ?? null,
-        page_avatar: page?.profile_image ?? null,
-        is_saved: savedIds.has(d.id),
-      }))
-    );
+    setPosts(await pagesApi.listPagePosts(pageId!).catch(() => []));
   };
 
   const toggleFollow = async () => {
     if (!user || !page) return;
-    if (following) {
-      await supabase.rpc("unfollow_page", { p_user_id: user.id, p_page_id: page.id });
-      setFollowing(false);
-      setPage({ ...page, followers_count: Math.max(0, page.followers_count - 1) });
-    } else {
-      await supabase.rpc("follow_page", { p_user_id: user.id, p_page_id: page.id });
-      setFollowing(true);
-      setPage({ ...page, followers_count: page.followers_count + 1 });
-      toast.success(`Following ${page.name}`);
+    try {
+      if (following) {
+        await pagesApi.unfollowPage(page.id);
+        setFollowing(false);
+        setPage({ ...page, followers_count: Math.max(0, page.followers_count - 1) });
+      } else {
+        await pagesApi.followPage(page.id);
+        setFollowing(true);
+        setPage({ ...page, followers_count: page.followers_count + 1 });
+        toast.success(`Following ${page.name}`);
+      }
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't update follow"));
     }
   };
 

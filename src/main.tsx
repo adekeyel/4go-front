@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
+import { SW_URL } from "./lib/swUrl";
 
 // One-time cleanup: unregister legacy ad-network service workers and purge old
 // caches that left iPhone/Safari users on broken/stale builds.
@@ -54,7 +55,7 @@ if ("serviceWorker" in navigator) {
     });
   } else {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("/sw.js").catch(() => {
+      navigator.serviceWorker.register(SW_URL).catch(() => {
         // SW registration failed
       });
     });

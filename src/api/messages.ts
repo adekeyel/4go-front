@@ -49,3 +49,32 @@ export async function reactToMessage(messageId: string, emoji: string) {
   const { data } = await apiClient.post(`/messages/${messageId}/reactions`, { emoji });
   return data;
 }
+
+export interface ReactionRow {
+  id: string;
+  message_id: string;
+  user_id: string;
+  emoji: string;
+}
+
+export async function listMessageReactions(messageId: string): Promise<ReactionRow[]> {
+  const { data } = await apiClient.get(`/messages/${messageId}/reactions`);
+  return data;
+}
+
+export async function removeReaction(messageId: string, emoji: string) {
+  await apiClient.delete(`/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+}
+
+/** Records that the signed-in user viewed a message. Returns the running view count when it was counted. */
+export async function recordMessageView(messageId: string): Promise<{ view_count?: number; self_view?: boolean; already_viewed?: boolean; recorded?: boolean }> {
+  const { data } = await apiClient.post(`/messages/${messageId}/view`);
+  return data;
+}
+
+/** View counts for the caller's own messages in a room. */
+export async function getMessageViewCounts(roomId: string, ids: string[]): Promise<Record<string, number>> {
+  if (!ids.length) return {};
+  const { data } = await apiClient.get(`/messages/room/${roomId}/views`, { params: { ids: ids.join(",") } });
+  return data;
+}

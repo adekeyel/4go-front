@@ -1,7 +1,7 @@
 import { useCallContext } from "@/contexts/CallContext";
 import CallOverlay from "@/components/CallOverlay";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { listFriends } from "@/api/friends";
 import { useAuth } from "@/contexts/AuthContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -30,20 +30,9 @@ export default function GlobalCallOverlay() {
     if (!user) return;
     setLoadingFriends(true);
     try {
-      const { data: rels } = await supabase
-        .from("friends")
-        .select("requester_id, addressee_id")
-        .or(`requester_id.eq.${user.id},addressee_id.eq.${user.id}`)
-        .eq("status", "accepted");
-      const ids = (rels || []).map((r) => (r.requester_id === user.id ? r.addressee_id : r.requester_id));
       const inCallIds = new Set(call.participants.map((p) => p.peerId));
-      const filteredIds = ids.filter((id) => !inCallIds.has(id));
-      if (filteredIds.length === 0) { setFriends([]); return; }
-      const { data: profs } = await supabase
-        .from("profiles")
-        .select("user_id, display_name, username, avatar_url")
-        .in("user_id", filteredIds);
-      setFriends(profs || []);
+      const all = await listFriends().catch(() => []);
+      setFriends(all.filter((p) => !inCallIds.has(p.user_id)));
     } finally {
       setLoadingFriends(false);
     }

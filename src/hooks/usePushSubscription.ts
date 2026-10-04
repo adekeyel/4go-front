@@ -1,5 +1,5 @@
 import { useEffect, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/lib/apiClient";
 import { useAuth } from "@/contexts/AuthContext";
 
 // VAPID public key - safe to expose client-side
@@ -63,18 +63,9 @@ export function usePushSubscription() {
       const p256dh = arrayBufferToBase64(key);
       const authKey = arrayBufferToBase64(auth);
 
-      // Bind through the backend function so a browser endpoint can safely move
-      // from an old logged-in account to the current user.
-      const { error } = await supabase.functions.invoke("rotate-push-subscription", {
-        body: {
-          oldEndpoint: subscription.endpoint,
-          endpoint: subscription.endpoint,
-          p256dh,
-          auth: authKey,
-        },
-      });
-
-      if (error) console.error("Failed to save push subscription:", error);
+      // Bind this device to the signed-in user. An endpoint belongs to one browser install, so if another
+      // account used it before, the server moves it to the current user.
+      await apiClient.post("/push/subscribe", { endpoint: subscription.endpoint, keys: { p256dh, auth: authKey } });
     } catch (err) {
       console.error("Push subscription failed:", err);
     }
@@ -106,23 +97,13 @@ export function usePushSubscription() {
         const p256dh = sub.getKey("p256dh");
         const auth = sub.getKey("auth");
         if (!p256dh || !auth) return;
-        await fetch(
-          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/rotate-push-subscription`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-            },
-            body: JSON.stringify({
-              oldEndpoint: sub.endpoint,
-              endpoint: sub.endpoint,
-              p256dh: arrayBufferToBase64(p256dh),
-              auth: arrayBufferToBase64(auth),
-            }),
-          },
-        );
+        // No login: the server finds the owner from the endpoint it already knows.
+        await apiClient.post("/push/rotate", {
+          oldEndpoint: sub.endpoint,
+          endpoint: sub.endpoint,
+          p256dh: arrayBufferToBase64(p256dh),
+          auth: arrayBufferToBase64(auth),
+        });
       } catch { /* ignore */ }
     })();
   }, [user, subscribeToPush]);

@@ -1,7 +1,8 @@
 import AdBanner from "@/components/AdBanner";
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { listContests, getContestLeaderboard, joinContest as joinContestApi } from "@/api/contests";
+import { apiErrorMessage } from "@/lib/apiClient";
 import { useAuth } from "@/contexts/AuthContext";
 import { ArrowLeft, Trophy, Users, Clock, CheckCircle, Medal, Crown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -59,26 +60,13 @@ export default function ContestsPage() {
   const [pendingJoinId, setPendingJoinId] = useState<string | null>(null);
 
   const loadContests = useCallback(async () => {
-    const [{ data: contestData }, { data: myParticipation }] = await Promise.all([
-      supabase.from("contests").select("*").in("status", ["active", "ended"]).order("created_at", { ascending: false }),
-      supabase.from("contest_participants").select("contest_id").eq("user_id", user!.id),
-    ]);
-
-    const c = (contestData || []) as Contest[];
+    // One call returns every contest with its participant count and whether you joined.
+    // Drafts are an admin thing, so only active and ended ones are shown here.
+    const all = await listContests().catch(() => []);
+    const c = all.filter((x) => x.status === "active" || x.status === "ended") as unknown as Contest[];
     setContests(c);
-    setJoinedIds(new Set((myParticipation || []).map((p) => p.contest_id)));
-
-    if (c.length > 0) {
-      const counts = new Map<string, number>();
-      for (const contest of c) {
-        const { count } = await supabase
-          .from("contest_participants")
-          .select("id", { count: "exact", head: true })
-          .eq("contest_id", contest.id);
-        counts.set(contest.id, count || 0);
-      }
-      setParticipantCounts(counts);
-    }
+    setJoinedIds(new Set(all.filter((x) => x.joined).map((x) => x.id)));
+    setParticipantCounts(new Map<string, number>(all.map((x): [string, number] => [x.id, x.participant_count])));
     setLoading(false);
   }, [user]);
 
@@ -90,16 +78,20 @@ export default function ContestsPage() {
   const performJoin = async (contestId: string) => {
     if (!user) return;
     setJoining(contestId);
-    const { error } = await supabase.from("contest_participants").insert({
-      contest_id: contestId,
-      user_id: user.id,
-    });
-    setJoining(null);
-    if (error) {
-      if (error.code === "23505") toast.info("You already joined this contest");
-      else toast.error("Failed to join contest");
+    try {
+      const res = await joinContestApi(contestId);
+      if (res.already_joined) {
+        setJoining(null);
+        setJoinedIds(prev => new Set([...prev, contestId]));
+        toast.info("You already joined this contest");
+        return;
+      }
+    } catch (err) {
+      setJoining(null);
+      toast.error(apiErrorMessage(err, "Failed to join contest"));
       return;
     }
+    setJoining(null);
     setJoinedIds(prev => new Set([...prev, contestId]));
     setParticipantCounts(prev => {
       const n = new Map(prev);
@@ -120,10 +112,8 @@ export default function ContestsPage() {
   const openLeaderboard = async (contest: Contest) => {
     setLeaderboardContest(contest);
     setLoadingLeaderboard(true);
-    const { data } = await supabase.rpc("get_contest_leaderboard", {
-      p_contest_id: contest.id,
-    });
-    const entries = (data || []) as LeaderboardEntry[];
+    const data = await getContestLeaderboard(contest.id).catch(() => []);
+    const entries = data as LeaderboardEntry[];
     setLeaderboard(entries);
     setLoadingLeaderboard(false);
   };
@@ -132,9 +122,7 @@ export default function ContestsPage() {
   useEffect(() => {
     if (!leaderboardContest) return;
     const interval = window.setInterval(async () => {
-      const { data } = await supabase.rpc("get_contest_leaderboard", {
-        p_contest_id: leaderboardContest.id,
-      });
+      const data = await getContestLeaderboard(leaderboardContest.id).catch(() => null);
       if (data) setLeaderboard(data as LeaderboardEntry[]);
     }, 30000);
     return () => window.clearInterval(interval);

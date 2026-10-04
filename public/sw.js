@@ -4,8 +4,8 @@ const ICON_CACHE = "4go-icons-v1";
 
 // Keep in sync with src/hooks/usePushSubscription.ts
 const VAPID_PUBLIC_KEY = "BCwuZJQ0w0XD7DjJsTY_dZ4HbHd8Xhgq6sSzsjrJCAZomUJx0oBsm-VZCbbLAoS61ncdUWzobQghwPRLoFgbM54";
-const SUPABASE_URL = "https://rqwtqgynlmgubequzlmt.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJxd3RxZ3lubG1ndWJlcXV6bG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyNjYyMTUsImV4cCI6MjA4OTg0MjIxNX0.THhU6O0nUWSkXBm_2S65TwOgEoYNDoXauh5AXLWYMi0";
+// The API address is passed in the registration URL (/sw.js?api=...), see src/lib/swUrl.ts
+const API_URL = new URL(self.location.href).searchParams.get("api") || "";
 const CLOSED_CALL_TAGS = new Set();
 
 async function closeCallNotifications(tags) {
@@ -38,15 +38,13 @@ async function rotateSubscription(oldEndpoint) {
     const p256dh = sub.getKey("p256dh");
     const auth = sub.getKey("auth");
     if (!p256dh || !auth) return;
-    await fetch(`${SUPABASE_URL}/functions/v1/rotate-push-subscription`, {
+    if (!API_URL) return;
+    // No login is available in a service worker; the server works out the owner from the old endpoint.
+    await fetch(`${API_URL}/api/push/rotate`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        oldEndpoint: oldEndpoint || null,
+        oldEndpoint: oldEndpoint || undefined,
         endpoint: sub.endpoint,
         p256dh: b64(p256dh),
         auth: b64(auth),

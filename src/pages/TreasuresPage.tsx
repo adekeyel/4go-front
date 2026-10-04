@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
+import { searchProfiles } from "@/api/profiles";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { ArrowLeft, Coins, Gift, TrendingUp, Wallet } from "lucide-react";
 import { usePremium } from "@/hooks/usePremium";
@@ -63,11 +65,11 @@ export default function TreasuresPage() {
   }, []);
 
   const fetchTreasures = async () => {
-    const { data } = await supabase
-      .from("treasures")
-      .select("*")
-      .order("sort_order", { ascending: true });
-    setTreasures((data as Treasure[]) || []);
+    try {
+      setTreasures(await walletApi.listTreasures());
+    } catch {
+      toast.error("Couldn't load treasures");
+    }
     setLoading(false);
   };
 
@@ -76,26 +78,20 @@ export default function TreasuresPage() {
     if (!amount || amount <= 0 || !user) return;
     
     try {
-      const { data, error } = await supabase.functions.invoke("create-payment", {
-        body: {
-          amount,
-          email: user.email,
-          userId: user.id,
-          redirectUrl: `${window.location.origin}/treasures?verify=true`,
-        },
+      // ₦1 = 1 coin. The server prices it and ignores anything else the browser says.
+      const data = await walletApi.initiatePayment({
+        purpose: "coins",
+        amount,
+        redirectUrl: `${window.location.origin}/treasures?verify=true`,
       });
-      
-      if (error || !data?.link) {
+      if (!data?.link) {
         toast.error("Failed to initiate payment");
         return;
       }
-      
-      // Store txRef for verification
       localStorage.setItem("4go-pending-tx", JSON.stringify({ txRef: data.txRef, userId: user.id }));
-      // Redirect to Flutterwave
-      window.location.href = data.link;
-    } catch {
-      toast.error("Payment service unavailable");
+      window.location.href = data.link; // Flutterwave checkout
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Payment service unavailable"));
     }
   };
 
@@ -107,15 +103,16 @@ export default function TreasuresPage() {
     
     if (transactionId && status === "successful" && user) {
       const verifyPayment = async () => {
-        const { data, error } = await supabase.functions.invoke("verify-payment", {
-          body: { transactionId, userId: user.id },
-        });
-        
-        if (data?.success) {
-          toast.success(`${data.coins.toLocaleString()} coins added to your balance!`);
-          await refreshProfile();
-        } else {
-          toast.error("Payment verification failed");
+        try {
+          const data = await walletApi.verifyPayment(transactionId);
+          if (data?.success) {
+            toast.success(`${Number(data.coins ?? 0).toLocaleString()} coins added to your balance!`);
+            await refreshProfile();
+          } else {
+            toast.error("Payment verification failed");
+          }
+        } catch (err) {
+          toast.error(apiErrorMessage(err, "Payment verification failed"));
         }
         
         // Clean URL
@@ -130,11 +127,9 @@ export default function TreasuresPage() {
     if (!user || !selectedTreasure || !recipientUsername.trim()) return;
     setSending(true);
 
-    const { data: recipient } = await supabase
-      .from("profiles")
-      .select("user_id")
-      .eq("username", recipientUsername.trim())
-      .single();
+    const wanted = recipientUsername.trim().replace(/^@/, "").toLowerCase();
+    const matches = await searchProfiles(wanted).catch(() => []);
+    const recipient = matches.find((p) => p.username?.toLowerCase() === wanted);
 
     if (!recipient) {
       toast.error("User not found");
@@ -148,14 +143,10 @@ export default function TreasuresPage() {
       return;
     }
 
-    const { error } = await supabase.rpc("send_gift", {
-      p_sender_id: user.id,
-      p_receiver_id: recipient.user_id,
-      p_treasure_id: selectedTreasure.id,
-    });
-
-    if (error) {
-      toast.error(error.message || "Failed to send gift");
+    try {
+      await walletApi.sendGift({ receiverId: recipient.user_id, treasureId: selectedTreasure.id });
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Failed to send gift"));
       setSending(false);
       return;
     }
@@ -183,16 +174,15 @@ export default function TreasuresPage() {
       return;
     }
     setLevelingUp(true);
-    const { data, error } = await supabase.rpc("spend_coins_for_progress", { p_user_id: user.id, p_amount: amount });
-    if (error) {
-      toast.error(error.message || "Failed to level up");
-    } else {
-      const result = data as unknown as { minutes_added: number; new_rank: string };
+    try {
+      const result = await walletApi.levelUp(amount);
       const hrs = Math.floor(result.minutes_added / 60);
       const mins = result.minutes_added % 60;
       toast.success(`🎉 +${hrs}h ${mins}m progress! New rank: ${result.new_rank}`);
       await refreshProfile();
       setLevelUpOpen(false);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Failed to level up"));
     }
     setLevelingUp(false);
   };
@@ -213,12 +203,10 @@ export default function TreasuresPage() {
     setAccountName("");
     setAccountVerified(false);
 
-    const { data, error } = await supabase.functions.invoke("resolve-account", {
-      body: { account_number: accountNumber, account_bank: bankCode },
-    });
+    const data = await walletApi.resolveBankAccount(accountNumber, bankCode);
 
-    if (error || !data?.success) {
-      toast.error(data?.error || "Could not verify account. Check details and try again.");
+    if (!data.success || !data.account_name) {
+      toast.error(data.error || "Could not verify account. Check details and try again.");
       setVerifying(false);
       return;
     }
@@ -249,16 +237,15 @@ export default function TreasuresPage() {
     }
     setWithdrawing(true);
 
-    const { data, error } = await supabase.rpc("request_withdrawal", {
-      p_user_id: user.id,
-      p_amount: amount,
-      p_bank_code: bankCode.trim(),
-      p_account_number: accountNumber.trim(),
-      p_account_name: accountName.trim(),
-    });
-
-    if (error) {
-      toast.error(error.message || "Withdrawal request failed");
+    try {
+      await walletApi.requestWithdrawal({
+        amount,
+        bank_code: bankCode.trim(),
+        account_number: accountNumber.trim(),
+        account_name: accountName.trim(),
+      });
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Withdrawal request failed"));
       setWithdrawing(false);
       return;
     }

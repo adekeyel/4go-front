@@ -6,7 +6,7 @@ import {
   Search as SearchIcon, LifeBuoy, Inbox, ArrowUpRight, Headphones, Bell, Mail,
   Speaker, Tag, TrendingUp, Repeat, Settings, SlidersHorizontal, Database, KeyRound,
   ScrollText, Trophy, Send,
-  Briefcase, Network, UserCheck,
+  Briefcase, Network, UserCheck, Layers,
   type LucideIcon,
 } from "lucide-react";
 
@@ -78,6 +78,7 @@ export const adminNav: AdminNavGroup[] = [
     icon: Boxes,
     items: [
       { id: "comm-groups", label: "Groups", icon: UsersRound },
+      { id: "comm-pages", label: "Pages", icon: Layers },
       { id: "comm-channels", label: "Channels", icon: Radio },
       { id: "comm-broadcast", label: "Broadcast Communities", icon: Megaphone },
       { id: "comm-reports", label: "Community Reports", icon: ShieldAlert },
@@ -142,6 +143,7 @@ export const adminNav: AdminNavGroup[] = [
     items: [
       { id: "an-growth", label: "User Growth", icon: TrendingUp },
       { id: "an-chat", label: "Chat Activity", icon: MessagesSquare },
+      { id: "an-active-users", label: "Most Active Users", icon: Activity },
       { id: "an-engagement", label: "Engagement", icon: Activity },
       { id: "an-retention", label: "Retention", icon: Repeat },
       { id: "an-revenue", label: "Revenue", icon: LineChart },
@@ -162,7 +164,6 @@ export const adminNav: AdminNavGroup[] = [
     items: [
       { id: "ads-advertisers", label: "Advertisers", icon: Building2 },
       { id: "ads-banners", label: "Banner Management", icon: Image },
-      { id: "ads-video", label: "Video Ads", icon: Video },
     ],
   },
   {

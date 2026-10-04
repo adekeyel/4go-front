@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
+import { uploadFile } from "@/api/uploads";
+import { apiErrorMessage } from "@/lib/apiError";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -34,13 +36,7 @@ export default function CreatePagePage() {
 
   const eligible = canCreatePage(profile?.rank);
 
-  const upload = async (file: File, prefix: string) => {
-    const ext = file.name.split(".").pop();
-    const path = `${user!.id}/pages/${prefix}-${Date.now()}.${ext}`;
-    const { error } = await supabase.storage.from("avatars").upload(path, file, { contentType: file.type, upsert: true });
-    if (error) throw error;
-    return supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl;
-  };
+  const upload = async (file: File, prefix: string) => (await uploadFile(file, `pages/${prefix}`)).url;
 
   const handleSubmit = async () => {
     if (!user || !name.trim()) { toast.error("Page name is required"); return; }
@@ -48,19 +44,18 @@ export default function CreatePagePage() {
     try {
       const profileUrl = profileFile ? await upload(profileFile, "profile") : null;
       const coverUrl = coverFile ? await upload(coverFile, "cover") : null;
-      const { data, error } = await supabase.rpc("create_page", {
-        p_owner_id: user.id,
-        p_name: name.trim(),
-        p_about: about.trim() || null,
-        p_category: category,
-        p_profile_image: profileUrl,
-        p_cover_image: coverUrl,
+      // The server checks your rank and page limit and answers with a readable message if you can't.
+      const data = await pagesApi.createPage({
+        name: name.trim(),
+        about: about.trim() || null,
+        category,
+        profile_image: profileUrl,
+        cover_image: coverUrl,
       });
-      if (error) throw error;
       toast.success("Page created!");
-      navigate(`/pages/${data}`);
+      navigate(`/pages/${data.id}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to create page");
+      toast.error(apiErrorMessage(err, "Failed to create page"));
     } finally {
       setSubmitting(false);
     }

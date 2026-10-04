@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { ArrowLeft, Gift, Clock, CheckCircle2, Coins } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -22,23 +23,12 @@ export default function DailyActivityPage() {
   const [boostCoins, setBoostCoins] = useState(0);
 
   const fetchClaims = useCallback(async () => {
-    const todayStart = new Date();
-    todayStart.setUTCHours(0, 0, 0, 0);
-
-    const { data } = await supabase
-      .from("daily_claims")
-      .select("claimed_at")
-      .eq("user_id", user!.id)
-      .gte("claimed_at", todayStart.toISOString())
-      .order("claimed_at", { ascending: false });
-
-    const claims = data || [];
-    setClaimsToday(claims.length);
-
-    if (claims.length > 0) {
-      const lastClaim = new Date(claims[0].claimed_at);
-      const next = new Date(lastClaim.getTime() + 6 * 3600000);
-      if (next > new Date()) setNextClaimAt(next);
+    try {
+      const st = await walletApi.getDailyClaimStatus();
+      setClaimsToday(st.claimsToday);
+      if (st.nextClaimAt && new Date(st.nextClaimAt) > new Date()) setNextClaimAt(new Date(st.nextClaimAt));
+    } catch {
+      /* the page still works; the claim button reports any problem */
     }
     setInitialLoading(false);
   }, [user]);
@@ -65,47 +55,37 @@ export default function DailyActivityPage() {
   const handleClaim = async () => {
     if (!user) return;
     setLoading(true);
-    const { data, error } = await supabase.rpc("claim_daily_reward", {
-      p_user_id: user.id,
-    });
-
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    } else {
-      const result = data as { success: boolean; error?: string; coins_awarded?: number; claims_today?: number; next_claim_at?: string };
-      if (result.success) {
-        setClaimsToday(result.claims_today || claimsToday + 1);
-        setNextClaimAt(new Date(Date.now() + 6 * 3600000));
-        refreshProfile();
-        // Offer first boost
-        setBoostCoins(result.coins_awarded || 100);
-        setBoostStage(1);
-        toast({ title: "🎉 Reward Claimed!", description: `You earned ${result.coins_awarded} coins! Boost it for more?` });
-      } else {
-        toast({ title: "Cannot claim", description: result.error, variant: "destructive" });
-        if (result.next_claim_at) setNextClaimAt(new Date(result.next_claim_at));
-      }
+    try {
+      const result = await walletApi.claimDaily();
+      setClaimsToday((c) => c + 1);
+      setNextClaimAt(new Date(Date.now() + 6 * 3600000));
+      refreshProfile();
+      // Offer first boost
+      setBoostCoins(result.coinsAwarded || 100);
+      setBoostStage(1);
+      toast({ title: "🎉 Reward Claimed!", description: `You earned ${result.coinsAwarded} coins! Boost it for more?` });
+    } catch (err) {
+      toast({ title: "Cannot claim", description: apiErrorMessage(err, "Try again in a moment"), variant: "destructive" });
+      void fetchClaims(); // pick up the real cooldown from the server
     }
     setLoading(false);
   };
 
-  // Credit a boost reward (called after sponsor visit)
-  const grantBoost = async (next: 0 | 2) => {
+  // Boost reward (after a sponsor visit). The server grants it: once per stage, only after a recent claim.
+  const grantBoost = async (stage: 1 | 2, next: 0 | 2) => {
     if (!user) return;
-    const { error } = await supabase.rpc("credit_reward_coins", {
-      p_user_id: user.id,
-      p_amount: 100,
-      p_description: "Sponsor boost reward",
-    });
-    if (error) {
-      toast({ title: "Boost failed", description: error.message, variant: "destructive" });
+    try {
+      const r = await walletApi.boostDailyClaim(stage);
+      if (r.coinsAwarded > 0) {
+        setBoostCoins((c) => c + r.coinsAwarded);
+        toast({ title: "🚀 Boosted!", description: `+${r.coinsAwarded} coins added to your wallet.` });
+      }
+      await refreshProfile();
+      setBoostStage(next);
+    } catch (err) {
+      toast({ title: "Boost failed", description: apiErrorMessage(err, "Try again"), variant: "destructive" });
       setBoostStage(0);
-      return;
     }
-    setBoostCoins((c) => c + 100);
-    await refreshProfile();
-    toast({ title: "🚀 Boosted!", description: "+100 coins added to your wallet." });
-    setBoostStage(next);
   };
 
   const canClaim = claimsToday < 3 && !countdown;
@@ -199,7 +179,7 @@ export default function DailyActivityPage() {
         description={`You have ${boostCoins} coins. Visit our sponsor for an extra +100 coins.`}
         continueLabel="Boost +100"
         cancelLabel="Skip"
-        onContinue={() => grantBoost(2)}
+        onContinue={() => grantBoost(1, 2)}
         onCancel={() => setBoostStage(0)}
       />
       <SponsorGateDialog
@@ -208,7 +188,7 @@ export default function DailyActivityPage() {
         description={`You have ${boostCoins} coins. One more sponsor visit unlocks +100 coins.`}
         continueLabel="Final Boost"
         cancelLabel="Skip"
-        onContinue={() => grantBoost(0)}
+        onContinue={() => grantBoost(2, 0)}
         onCancel={() => setBoostStage(0)}
       />
     </div>

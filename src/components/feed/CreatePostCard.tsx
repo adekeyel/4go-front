@@ -1,6 +1,8 @@
 import { useState, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/integrations/supabase/client";
+import * as feedApi from "@/api/feed";
+import { uploadFile } from "@/api/uploads";
+import { apiErrorMessage } from "@/lib/apiError";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -45,30 +47,17 @@ export default function CreatePostCard({ onPostCreated }: CreatePostCardProps) {
       let image_url: string | null = null;
 
       if (imageFile) {
-        const ext = imageFile.name.split(".").pop();
-        const path = `posts/${user.id}/${Date.now()}.${ext}`;
-        const { error: uploadErr } = await supabase.storage
-          .from("chat-media")
-          .upload(path, imageFile, { contentType: imageFile.type });
-        if (uploadErr) throw uploadErr;
-        const { data: urlData } = supabase.storage.from("chat-media").getPublicUrl(path);
-        image_url = urlData.publicUrl;
+        image_url = (await uploadFile(imageFile, "posts")).url;
       }
 
-      const { error } = await supabase.from("posts").insert({
-        user_id: user.id,
-        content: content.trim(),
-        image_url,
-      });
-
-      if (error) throw error;
+      await feedApi.createPost({ content: content.trim(), image_url });
 
       setContent("");
       removeImage();
       onPostCreated();
       toast.success("Post created!");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to create post");
+      toast.error(apiErrorMessage(err, "Failed to create post"));
     } finally {
       setPosting(false);
     }

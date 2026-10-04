@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import * as pagesApi from "@/api/pages";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,22 +34,15 @@ export default function PageDashboardPage() {
   const [boostPostId, setBoostPostId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { data: p } = await supabase.from("pages").select("name, owner_id").eq("id", pageId!).maybeSingle();
+    const p = await pagesApi.getPage(pageId!).catch(() => null);
     if (!p || (user && p.owner_id !== user.id)) {
       toast.error("Only the owner can view this dashboard");
       navigate(`/pages/${pageId}`);
       return;
     }
     setPageName(p.name);
-    const { data: po } = await supabase
-      .from("page_posts").select("*").eq("page_id", pageId!).order("created_at", { ascending: false });
-    setPosts(po ?? []);
-    const ids = (po ?? []).map((x) => x.id);
-    if (ids.length) {
-      const { data: b } = await supabase
-        .from("post_boosts").select("*").in("post_id", ids).order("created_at", { ascending: false });
-      setBoosts(b ?? []);
-    } else setBoosts([]);
+    setPosts(await pagesApi.listPagePosts(pageId!).catch(() => []));
+    setBoosts(await pagesApi.listPageBoosts(pageId!).catch(() => []));
   }, [pageId, user, navigate]);
 
   useEffect(() => { if (pageId) load(); }, [pageId, load]);

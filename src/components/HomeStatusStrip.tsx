@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import * as statusesApi from "@/api/statuses";
+import { useSocket } from "@/sockets/SocketContext";
 import { useAuth } from "@/contexts/AuthContext";
 import UserAvatar from "@/components/UserAvatar";
 import ProfileBadges from "@/components/ProfileBadges";
@@ -17,32 +18,29 @@ type Group = { profile: ProfileLite; count: number; lastAt: string };
 
 /**
  * Horizontal strip of friends' status updates, shown on the Home header.
- * RLS already restricts `statuses` to friends + self, non-expired.
+ * The server only returns your own and your friends' unexpired statuses.
  */
 export default function HomeStatusStrip() {
   const { user, profile } = useAuth();
   const navigate = useNavigate();
   const [groups, setGroups] = useState<Group[]>([]);
   const [hasMine, setHasMine] = useState(false);
+  const socket = useSocket();
 
   const load = async () => {
     if (!user) return;
-    const { data: rows } = await supabase
-      .from("statuses")
-      .select("user_id, created_at")
-      .order("created_at", { ascending: false });
-    const list = (rows || []) as { user_id: string; created_at: string }[];
+    let list: statusesApi.StatusItem[];
+    try {
+      list = await statusesApi.listStatuses();
+    } catch {
+      return;
+    }
     if (list.length === 0) {
       setGroups([]);
       setHasMine(false);
       return;
     }
-    const userIds = Array.from(new Set(list.map((r) => r.user_id)));
-    const { data: profs } = await supabase
-      .from("profiles")
-      .select("user_id, display_name, username, avatar_url")
-      .in("user_id", userIds);
-    const profMap = new Map((profs || []).map((p) => [p.user_id, p as ProfileLite]));
+    const profMap = new Map<string, ProfileLite>(list.filter((r) => r.profile).map((r) => [r.user_id, r.profile as ProfileLite]));
 
     const grouped = new Map<string, Group>();
     for (const r of list) {
@@ -71,20 +69,19 @@ export default function HomeStatusStrip() {
 
   useEffect(() => {
     void load();
-    if (!user) return;
-    const ch = supabase
-      .channel("home-status-strip")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "statuses" },
-        () => void load()
-      )
-      .subscribe();
-    return () => {
-      void supabase.removeChannel(ch);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
+
+  // Someone posted or deleted a status: refresh the strip.
+  useEffect(() => {
+    if (!socket) return;
+    const refresh = () => void load();
+    socket.on("status:changed", refresh);
+    return () => {
+      socket.off("status:changed", refresh);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, user?.id]);
 
   if (!user) return null;
 

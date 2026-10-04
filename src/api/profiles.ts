@@ -40,3 +40,14 @@ export async function getAdminAccess(): Promise<boolean> {
   const { data } = await apiClient.get("/profiles/me/admin-access");
   return !!data.isAdmin;
 }
+
+export async function getLeaderboard(limit = 50): Promise<Profile[]> {
+  const { data } = await apiClient.get("/profiles/leaderboard", { params: { limit } });
+  return data;
+}
+
+export async function getProfilesByUsernames(usernames: string[]): Promise<Profile[]> {
+  if (!usernames.length) return [];
+  const { data } = await apiClient.get("/profiles", { params: { usernames: usernames.join(",") } });
+  return data;
+}

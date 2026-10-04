@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { getProfile } from "@/api/profiles";
 import PremiumBadge from "@/components/PremiumBadge";
 import VerifiedIdentityBadge from "@/components/VerifiedIdentityBadge";
 
@@ -20,11 +20,7 @@ function fetchFlags(userId: string): Promise<Flags> {
   const existing = inflight.get(userId);
   if (existing) return existing;
   const p = (async () => {
-    const { data } = await supabase
-      .from("profiles")
-      .select("is_premium, is_verified")
-      .eq("user_id", userId)
-      .maybeSingle();
+    const data = await getProfile(userId).catch(() => null);
     const flags: Flags = {
       is_premium: !!data?.is_premium,
       is_verified: !!data?.is_verified,
@@ -37,23 +33,10 @@ function fetchFlags(userId: string): Promise<Flags> {
   return p;
 }
 
-function ensureRealtime(userId: string) {
-  if (realtimeIds.has(userId)) return;
-  realtimeIds.add(userId);
-  supabase
-    .channel(`profile-flags-${userId}`)
-    .on(
-      "postgres_changes",
-      { event: "UPDATE", schema: "public", table: "profiles", filter: `user_id=eq.${userId}` },
-      (payload) => {
-        const n = payload.new as { is_premium?: boolean; is_verified?: boolean };
-        notify(userId, {
-          is_premium: !!n.is_premium,
-          is_verified: !!n.is_verified,
-        });
-      }
-    )
-    .subscribe();
+// Premium/verified flags change rarely (a purchase or an approval), so they're fetched once per
+// user and cached for the session instead of being pushed live. A refresh picks up changes.
+function ensureRealtime(_userId: string) {
+  /* no-op: kept so existing call sites stay valid */
 }
 
 interface Props {

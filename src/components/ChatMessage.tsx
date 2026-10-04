@@ -4,7 +4,7 @@ import SharedPostMessage from "@/components/feed/SharedPostMessage";
 import SharedPagePostMessage from "@/components/feed/SharedPagePostMessage";
 import MessageReactions from "@/components/MessageReactions";
 import { Tables } from "@/integrations/supabase/types";
-import { supabase } from "@/integrations/supabase/client";
+import { recordMessageView, getMessageViewCounts } from "@/api/messages";
 import { useAuth } from "@/contexts/AuthContext";
 import { Check, CheckCheck, CornerUpLeft, Eye, Flag, Gift, Mic, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";
 import { RankBadge } from "./RankBadge";
@@ -89,12 +89,11 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
   useEffect(() => {
     if (!user || !isViewEligible || isOwn) return;
     const recordView = async () => {
-      const { data } = await supabase.rpc("record_message_view", {
-        p_user_id: user.id,
-        p_message_id: message.id,
-      });
-      if (data && typeof data === "object" && "view_count" in data) {
-        setViewCount((data as { view_count: number }).view_count);
+      try {
+        const data = await recordMessageView(message.id);
+        if (data && typeof data.view_count === "number") setViewCount(data.view_count);
+      } catch {
+        // viewing is best-effort
       }
     };
     recordView();
@@ -107,11 +106,12 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
   useEffect(() => {
     if (!isOwn || !isViewEligible) return;
     const fetchCount = async () => {
-      const { count } = await supabase
-        .from("message_views")
-        .select("id", { count: "exact", head: true })
-        .eq("message_id", message.id);
-      setViewCount(count || 0);
+      try {
+        const counts = await getMessageViewCounts(roomId ?? message.room_id, [message.id]);
+        setViewCount(counts[message.id] ?? 0);
+      } catch {
+        setViewCount(0);
+      }
     };
     fetchCount();
   }, [message.id, isOwn, isViewEligible]);

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import * as walletApi from "@/api/wallet";
+import { apiErrorMessage } from "@/lib/apiError";
 import { useAuth } from "@/contexts/AuthContext";
 import { Coins } from "lucide-react";
 import { toast } from "sonner";
@@ -45,11 +46,7 @@ export default function GiftPostDialog({
 
   useEffect(() => {
     if (open) {
-      supabase
-        .from("treasures")
-        .select("*")
-        .order("sort_order", { ascending: true })
-        .then(({ data }) => setTreasures((data as Treasure[]) || []));
+      walletApi.listTreasures().then(setTreasures).catch(() => toast.error("Couldn't load treasures"));
     }
   }, [open]);
 
@@ -67,20 +64,13 @@ export default function GiftPostDialog({
     }
     setSending(true);
 
-    const { error } = await supabase.rpc("send_gift_to_post", {
-      p_sender_id: user.id,
-      p_receiver_id: receiverId,
-      p_treasure_id: treasure.id,
-      p_message_id: messageId,
-      p_room_id: roomId,
-    });
-
-    if (error) {
-      toast.error(error.message || "Failed to send gift");
-    } else {
+    try {
+      await walletApi.sendPostGift({ receiverId, treasureId: treasure.id, messageId, roomId });
       toast.success(`Sent ${treasure.icon} ${treasure.name} to ${receiverName}!`);
       await refreshProfile();
       onOpenChange(false);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Failed to send gift"));
     }
     setSending(false);
   };
