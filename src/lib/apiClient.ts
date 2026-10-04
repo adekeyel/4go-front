@@ -1,7 +1,11 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { getAccessToken, setAccessToken } from "./tokenStore";
 
-export const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
+// Normalise so a trailing slash or a trailing "/api" in VITE_API_URL can't produce /api/api/... URLs.
+export const API_URL = String(import.meta.env.VITE_API_URL || "http://localhost:4000")
+  .trim()
+  .replace(/\/+$/, "")
+  .replace(/\/api$/i, "");
 
 // withCredentials so the browser sends/receives the httpOnly refresh-token
 // cookie the backend sets on /api/auth/login|signup|refresh.
