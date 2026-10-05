@@ -15,6 +15,19 @@ async function closeCallNotifications(tags) {
   });
 }
 
+// Browsers require every push to show a notification; if none is shown, Chrome adds its own generic
+// "this site has been updated in the background" one. For the silent "call ended" pushes we show a notification
+// and take it straight back down, so nothing is left on screen.
+async function showAndDismiss(tag) {
+  try {
+    await self.registration.showNotification("Call ended", { tag: tag + "-end", silent: true, icon: "/icons/icon-192.png" });
+    const shown = await self.registration.getNotifications({ tag: tag + "-end" });
+    shown.forEach((n) => n.close());
+  } catch (e) {
+    // best effort
+  }
+}
+
 function urlBase64ToUint8Array(base64String) {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
@@ -103,11 +116,11 @@ self.addEventListener("push", (event) => {
   if (isCallCancelled) {
     CLOSED_CALL_TAGS.add(tag);
     setTimeout(() => CLOSED_CALL_TAGS.delete(tag), 15 * 60 * 1000);
-    event.waitUntil(closeCallNotifications([tag]));
+    event.waitUntil(closeCallNotifications([tag]).then(() => showAndDismiss(tag)));
     return;
   }
   if (isCall && CLOSED_CALL_TAGS.has(tag)) {
-    event.waitUntil(closeCallNotifications([tag]));
+    event.waitUntil(closeCallNotifications([tag]).then(() => showAndDismiss(tag)));
     return;
   }
   const options = {

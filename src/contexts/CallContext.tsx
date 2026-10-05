@@ -55,11 +55,18 @@ export function useCallContext() {
   return ctx;
 }
 
-const ICE_SERVERS: RTCIceServer[] = [
+// Used only if the backend can't be reached. The backend's /calls/ice-servers adds a TURN relay when one is
+// configured, which is what makes calls work between people on mobile data / strict networks.
+const FALLBACK_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
 ];
+
+// A call that nobody answers stops ringing on the caller's screen after this long (the server marks it missed at 45s).
+const CALLER_GIVE_UP_MS = 50_000;
+// A brief network drop (wifi <-> mobile data, a tunnel) shouldn't end the call: wait this long before giving up on a peer.
+const PEER_RECONNECT_GRACE_MS = 12_000;
 
 const MAX_PARTICIPANTS = 3; // max 4-way (self + 3 others)
 
@@ -69,6 +76,10 @@ interface PeerEntry {
   name: string;
   pendingCandidates: RTCIceCandidateInit[];
   hasRemoteDesc: boolean;
+  /** True when this side created the offer for this peer (only the offerer restarts a broken connection). */
+  initiator: boolean;
+  restartAttempted: boolean;
+  giveUpTimer: number | null;
 }
 
 function handleMediaError(err: unknown, type: CallType) {
@@ -115,6 +126,12 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const callRoomIdRef = useRef<string | null>(null);
   const handledCallIdsRef = useRef<Set<string>>(new Set());
   const ringTimeoutRef = useRef<number | null>(null);
+  const iceServersRef = useRef<RTCIceServer[]>(FALLBACK_ICE_SERVERS);
+  const roleRef = useRef<"caller" | "callee" | null>(null);
+  const peerAnsweredRef = useRef(false); // caller side: the callee has picked up (so don't give up on "no answer")
+  // Network candidates from the caller can arrive while the callee's phone is still ringing, before any peer
+  // connection exists. They used to be thrown away; now they're kept here until the callee answers.
+  const earlyIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
 
   useEffect(() => { callStateRef.current = callState; }, [callState]);
   useEffect(() => { callTypeRef.current = callType; }, [callType]);
@@ -132,6 +149,26 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const hasCallPermission = useCallback((type: CallType) => {
     return type === "video" ? canMakeVideoCall(rankRef.current) : canMakeVoiceCall(rankRef.current);
   }, []);
+
+  // ---------- ICE servers (STUN + TURN from the backend) ----------
+  const refreshIceServers = useCallback(async () => {
+    try {
+      const list = await Promise.race([
+        callsApi.getIceServers(),
+        new Promise<RTCIceServer[]>((_, reject) => window.setTimeout(() => reject(new Error("timeout")), 2500)),
+      ]);
+      if (list.length) iceServersRef.current = list;
+    } catch {
+      /* keep whatever we had; STUN-only still works on friendly networks */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    void refreshIceServers();
+    const id = window.setInterval(() => void refreshIceServers(), 6 * 60 * 60 * 1000); // TURN passwords are short-lived
+    return () => window.clearInterval(id);
+  }, [user, refreshIceServers]);
 
   // ---------- Ringtone helpers ----------
   const stopRingtone = useCallback(() => {
@@ -255,9 +292,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
     }
   }, [playMediaElement]);
 
-  const finalizeCallLog = useCallback((status: "answered" | "declined" | "cancelled" | "missed") => {
+  // Reports that this side hung up. The server decides the final status and measures the duration itself
+  // ("cancelled" only means something while the call is still ringing; once answered, any hang-up just ends it).
+  const connectedAtRef = useRef<number | null>(null);
+  const finalizeCallLog = useCallback(() => {
     if (!callLogIdRef.current) return;
-    void callsApi.updateCallStatus(callLogIdRef.current, status).catch((err) => console.warn("call log update failed", err));
+    const connected = callStateRef.current === "connected";
+    const status = connected || roleRef.current === "callee" ? "ended" : "cancelled";
+    const seconds = connectedAtRef.current ? Math.round((Date.now() - connectedAtRef.current) / 1000) : undefined;
+    void callsApi.updateCallStatus(callLogIdRef.current, status, seconds).catch((err) => console.warn("call log update failed", err));
   }, []);
 
   // ---------- Cleanup ----------
@@ -271,8 +314,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
     const activeRoomId = callRoomIdRef.current ?? incomingCallRef.current?.roomId;
     markCallHandled(activeCallId);
     closeCallNotifications(activeRoomId, activeCallId);
-    peersRef.current.forEach((entry) => { try { entry.pc.close(); } catch { /* ignore */ } });
+    peersRef.current.forEach((entry) => {
+      if (entry.giveUpTimer) window.clearTimeout(entry.giveUpTimer);
+      try { entry.pc.close(); } catch { /* ignore */ }
+    });
     peersRef.current.clear();
+    earlyIceRef.current.clear();
+    roleRef.current = null;
+    peerAnsweredRef.current = false;
+    connectedAtRef.current = null;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -308,7 +358,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
   }, [socket]);
 
   // ---------- Create a peer entry ----------
-  const createPeer = useCallback((peerId: string, name: string): PeerEntry => {
+  const createPeer = useCallback((peerId: string, name: string, initiator = false): PeerEntry => {
     const existing = peersRef.current.get(peerId);
     if (existing) {
       const local = localStreamRef.current;
@@ -318,7 +368,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       return existing;
     }
 
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
     const stream = new MediaStream();
 
     pc.onicecandidate = (e) => {
@@ -342,24 +392,63 @@ export function CallProvider({ children }: { children: ReactNode }) {
       refreshParticipantsState();
     };
 
+    const dropPeer = () => {
+      const gone = peersRef.current.get(peerId);
+      if (!gone) return;
+      if (gone.giveUpTimer) window.clearTimeout(gone.giveUpTimer);
+      try { gone.pc.close(); } catch { /* ignore */ }
+      peersRef.current.delete(peerId);
+      refreshParticipantsState();
+      if (peersRef.current.size === 0 && callStateRef.current !== "idle") {
+        finalizeCallLog();
+        cleanup();
+      }
+    };
+
+    // The offerer asks the other side to find a new network path (ICE restart): this is what rescues a call
+    // when the phone switches between wifi and mobile data.
+    const tryIceRestart = async () => {
+      const cur = peersRef.current.get(peerId);
+      if (!cur || !cur.initiator || cur.restartAttempted) return;
+      cur.restartAttempted = true;
+      try {
+        const offer = await cur.pc.createOffer({ iceRestart: true });
+        await cur.pc.setLocalDescription(offer);
+        sendSignal(peerId, { type: "offer", sdp: offer, restart: true });
+      } catch (err) {
+        console.warn("ICE restart failed", err);
+      }
+    };
+
+    const armGiveUp = () => {
+      const cur = peersRef.current.get(peerId);
+      if (!cur || cur.giveUpTimer) return;
+      cur.giveUpTimer = window.setTimeout(() => {
+        cur.giveUpTimer = null;
+        const st = cur.pc.connectionState;
+        if (st !== "connected") dropPeer();
+      }, PEER_RECONNECT_GRACE_MS);
+    };
+
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "connected") {
+      const cur = peersRef.current.get(peerId);
+      if (!cur) return;
+      const st = pc.connectionState;
+      if (st === "connected") {
+        if (cur.giveUpTimer) { window.clearTimeout(cur.giveUpTimer); cur.giveUpTimer = null; }
+        cur.restartAttempted = false;
         stopRingtone();
-        if (callStateRef.current !== "connected") setCallState("connected");
-      }
-      if (pc.connectionState === "failed") {
-        try { pc.restartIce(); } catch { /* ignore */ }
-      }
-      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
-        const entry = peersRef.current.get(peerId);
-        if (entry) {
-          peersRef.current.delete(peerId);
-          refreshParticipantsState();
-          if (peersRef.current.size === 0 && callStateRef.current !== "idle") {
-            finalizeCallLog(callStateRef.current === "connected" ? "answered" : "cancelled");
-            cleanup();
-          }
-        }
+        if (!connectedAtRef.current) connectedAtRef.current = Date.now();
+        if (callStateRef.current !== "connected") { callStateRef.current = "connected"; setCallState("connected"); }
+      } else if (st === "disconnected") {
+        // Usually a blink (network handover). Give it a moment to recover on its own, then try a restart.
+        armGiveUp();
+        window.setTimeout(() => { if (pc.connectionState === "disconnected") void tryIceRestart(); }, 3000);
+      } else if (st === "failed") {
+        armGiveUp();
+        void tryIceRestart();
+      } else if (st === "closed") {
+        dropPeer();
       }
     };
     pc.oniceconnectionstatechange = () => {
@@ -372,7 +461,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
     const local = localStreamRef.current;
     if (local) local.getTracks().forEach((t) => pc.addTrack(t, local));
 
-    const entry: PeerEntry = { pc, stream, name, pendingCandidates: [], hasRemoteDesc: false };
+    const entry: PeerEntry = { pc, stream, name, pendingCandidates: [], hasRemoteDesc: false, initiator, restartAttempted: false, giveUpTimer: null };
+    // Candidates the other side sent while we were still ringing.
+    const early = earlyIceRef.current.get(peerId);
+    if (early) { entry.pendingCandidates.push(...early); earlyIceRef.current.delete(peerId); }
     peersRef.current.set(peerId, entry);
     return entry;
   }, [sendSignal, refreshParticipantsState, stopRingtone, finalizeCallLog, cleanup]);
@@ -401,6 +493,8 @@ export function CallProvider({ children }: { children: ReactNode }) {
     callRoomIdRef.current = roomId;
     callStateRef.current = "calling";
     callTypeRef.current = type;
+    roleRef.current = "caller";
+    peerAnsweredRef.current = false;
     initialPeerIdRef.current = peerId;
     setCallType(type);
     setCallRoomId(roomId);
@@ -409,7 +503,8 @@ export function CallProvider({ children }: { children: ReactNode }) {
     playLoopingAudio("/ringback.mp3", "__callRingback");
 
     try {
-      await ensureLocalStream(type);
+      // Mic/camera prompt and fresh relay credentials in parallel, so the second doesn't add waiting time.
+      await Promise.all([ensureLocalStream(type), refreshIceServers()]);
     } catch (err) {
       console.error("startCall media:", err);
       handleMediaError(err, type);
@@ -424,7 +519,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       callIdRef.current = call.id;
       callLogIdRef.current = call.id;
 
-      const entry = createPeer(peerId, peerName);
+      const entry = createPeer(peerId, peerName, true);
       const offer = await entry.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: type === "video" });
       await entry.pc.setLocalDescription(offer);
 
@@ -440,12 +535,25 @@ export function CallProvider({ children }: { children: ReactNode }) {
       });
 
       // The server sends the incoming-call push itself when it receives call:invite.
+
+      // Nobody picked up: stop ringing on this screen. (The server records the call as missed on its own at 45s;
+      // this is only the caller's screen catching up, e.g. if the network dropped and the update never arrived.)
+      if (ringTimeoutRef.current) window.clearTimeout(ringTimeoutRef.current);
+      ringTimeoutRef.current = window.setTimeout(() => {
+        if (callStateRef.current === "calling" && !peerAnsweredRef.current && callIdRef.current === call.id) {
+          toast.info("No answer");
+          finalizeCallLog();
+          cleanup();
+        }
+      }, CALLER_GIVE_UP_MS);
     } catch (err) {
       console.error("startCall:", err);
-      handleMediaError(err, type);
+      const status = (err as { response?: { status?: number; data?: { error?: string } } })?.response;
+      if (status?.status && status.data?.error) toast.error(status.data.error); // e.g. blocked, rank too low
+      else handleMediaError(err, type);
       cleanup();
     }
-  }, [user, profile, hasCallPermission, stopRingtone, playLoopingAudio, ensureLocalStream, createPeer, socket, cleanup]);
+  }, [user, profile, hasCallPermission, stopRingtone, playLoopingAudio, ensureLocalStream, refreshIceServers, createPeer, finalizeCallLog, socket, cleanup]);
 
   // ---------- Add another participant (mesh, max 4 total) ----------
   const addParticipant = useCallback(async (peerId: string, peerName: string) => {
@@ -465,7 +573,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     try {
       const call = await callsApi.startCall(roomId, peerId, callTypeRef.current);
       const stream = await ensureLocalStream(callTypeRef.current);
-      const entry = createPeer(peerId, peerName);
+      const entry = createPeer(peerId, peerName, true);
       stream.getTracks().forEach((t) => {
         if (!entry.pc.getSenders().some((s) => s.track === t)) entry.pc.addTrack(t, stream);
       });
@@ -526,11 +634,17 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setCallState("calling");
     callIdRef.current = answeringCall.callId;
     callLogIdRef.current = answeringCall.callId;
+    roleRef.current = "callee";
     initialPeerIdRef.current = answeringCall.from;
 
+    // Record the answer on the server right away (it also stops this call ringing on the user's other devices),
+    // instead of waiting for the end of the call, which never came if the app was closed mid-call.
+    void callsApi.updateCallStatus(answeringCall.callId, "answered").catch((err) => console.warn("answer report failed", err));
+
     try {
+      if (!answeringCall.sdp) throw new Error("The call is no longer available");
       await ensureLocalStream(type);
-      const entry = createPeer(answeringCall.from, answeringCall.name);
+      const entry = createPeer(answeringCall.from, answeringCall.name, false);
       if (answeringCall.sdp) {
         await entry.pc.setRemoteDescription(new RTCSessionDescription(answeringCall.sdp));
         entry.hasRemoteDesc = true;
@@ -542,10 +656,16 @@ export function CallProvider({ children }: { children: ReactNode }) {
       }
     } catch (err) {
       console.error("answerCall:", err);
-      handleMediaError(err, type);
+      if ((err as Error)?.message === "The call is no longer available") {
+        toast.error("That call is no longer available.");
+        finalizeCallLog();
+      } else {
+        handleMediaError(err, type);
+        finalizeCallLog();
+      }
       cleanup();
     }
-  }, [incomingCall, user, socket, hasCallPermission, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, createPeer, cleanup]);
+  }, [incomingCall, user, socket, hasCallPermission, finalizeCallLog, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, createPeer, cleanup]);
 
   const endCall = useCallback(() => {
     peersRef.current.forEach((_entry, peerId) => sendSignal(peerId, { type: "leave" }));
@@ -557,7 +677,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     });
     groupInvitesRef.current.clear();
 
-    finalizeCallLog(callStateRef.current === "connected" ? "answered" : "cancelled");
+    finalizeCallLog();
     cleanup();
   }, [sendSignal, user?.id, finalizeCallLog, cleanup]);
 
@@ -667,6 +787,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
       if (handledCallIdsRef.current.has(payload.callId)) return;
       if (callStateRef.current !== "idle") {
         socket.emit("call:signal", { callId: payload.callId, to: payload.callerId, signal: { type: "reject", reason: "busy" } });
+        // On the line already: the call goes into this person's history as a missed call (like WhatsApp).
+        markCallHandled(payload.callId);
+        void callsApi.updateCallStatus(payload.callId, "missed").catch(() => {});
         return;
       }
       if (incomingCallRef.current?.callId === payload.callId) return;
@@ -680,6 +803,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       }
 
       callIdRef.current = payload.callId;
+      void refreshIceServers();
       setIncomingCall({
         from: payload.callerId,
         name: payload.callerName,
@@ -702,7 +826,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           void callsApi.updateCallStatus(payload.callId, "missed").catch(() => {});
           cleanup();
         }
-      }, 60_000);
+      }, CALLER_GIVE_UP_MS);
     };
 
     const onSignal = async ({ callId, from, signal }: { callId: string; from: string; signal: any }) => {
@@ -712,8 +836,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         markCallHandled(callId);
         if (callStateRef.current === "calling") {
           toast.info(signal.reason === "rank_not_permitted" ? "They're not able to accept this call yet." : signal.reason === "busy" ? "They're on another call." : "Call declined");
-          finalizeCallLog("declined");
-          cleanup();
+          cleanup(); // the callee's side already recorded the outcome on the server
         }
         return;
       }
@@ -722,7 +845,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
         if (entry) { try { entry.pc.close(); } catch { /* ignore */ } peersRef.current.delete(from); }
         refreshParticipantsState();
         if (peersRef.current.size === 0) {
-          finalizeCallLog(callStateRef.current === "connected" ? "answered" : "cancelled");
+          finalizeCallLog();
           cleanup();
         }
         return;
@@ -743,8 +866,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
           const answer = await entry.pc.createAnswer();
           await entry.pc.setLocalDescription(answer);
           sendSignal(from, { type: "answer", sdp: answer });
+        } else if (entry.hasRemoteDesc) {
+          // The other side is restarting the connection (their network changed): answer so media keeps flowing.
+          await entry.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+          const answer = await entry.pc.createAnswer();
+          await entry.pc.setLocalDescription(answer);
+          sendSignal(from, { type: "answer", sdp: answer, restart: true });
         }
       } else if (signal.type === "answer" && entry) {
+        peerAnsweredRef.current = true;
         await entry.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         entry.hasRemoteDesc = true;
         const drained = entry.pendingCandidates.splice(0);
@@ -752,13 +882,15 @@ export function CallProvider({ children }: { children: ReactNode }) {
         // Mesh fan-out: for group calls, tell every other already-connected
         // peer to open their own direct connection to this new one.
         const joinedName = entry.name;
-        peersRef.current.forEach((_other, otherId) => {
-          if (otherId !== from) sendSignal(otherId, { type: "join-mesh", peerId: from, peerName: joinedName });
-        });
+        if (!signal.restart) {
+          peersRef.current.forEach((_other, otherId) => {
+            if (otherId !== from) sendSignal(otherId, { type: "join-mesh", peerId: from, peerName: joinedName });
+          });
+        }
       } else if (signal.type === "join-mesh") {
         if (!peersRef.current.has(signal.peerId)) {
           const stream = await ensureLocalStream(callTypeRef.current);
-          const newEntry = createPeer(signal.peerId, signal.peerName || "Participant");
+          const newEntry = createPeer(signal.peerId, signal.peerName || "Participant", true);
           stream.getTracks().forEach((t) => {
             if (!newEntry.pc.getSenders().some((s) => s.track === t)) newEntry.pc.addTrack(t, stream);
           });
@@ -766,8 +898,14 @@ export function CallProvider({ children }: { children: ReactNode }) {
           await newEntry.pc.setLocalDescription(offer);
           sendSignal(signal.peerId, { type: "offer", sdp: offer });
         }
-      } else if (signal.type === "ice" && entry) {
-        if (entry.hasRemoteDesc) {
+      } else if (signal.type === "ice") {
+        if (!entry) {
+          // Still ringing, no connection yet: keep it for when we answer (before, these were dropped, which
+          // is a common reason a call connected one way or not at all).
+          const list = earlyIceRef.current.get(from) ?? [];
+          if (list.length < 200) list.push(signal.candidate);
+          earlyIceRef.current.set(from, list);
+        } else if (entry.hasRemoteDesc) {
           try { await entry.pc.addIceCandidate(new RTCIceCandidate(signal.candidate)); } catch { /* ignore */ }
         } else {
           entry.pendingCandidates.push(signal.candidate);
@@ -775,13 +913,39 @@ export function CallProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    // The server tells both people whenever a call changes. This is how the caller's screen stops ringing the
+    // moment the other side declines or the call is marked missed, and how a ringing phone stops when the caller
+    // hangs up or someone answers on another device.
+    const onUpdated = (row: { id: string; status: string; caller_id: string; callee_id: string }) => {
+      if (row.id !== callIdRef.current) return;
+      const over = row.status === "declined" || row.status === "missed" || row.status === "cancelled";
+      if (!over) return;
+      if (callStateRef.current === "calling" && !peerAnsweredRef.current && row.caller_id === user.id) {
+        toast.info(row.status === "declined" ? "Call declined" : "No answer");
+        markCallHandled(row.id);
+        cleanup();
+      } else if (callStateRef.current === "ringing" && incomingCallRef.current?.callId === row.id) {
+        markCallHandled(row.id);
+        cleanup();
+      }
+    };
+
+    // Ask the server for any call that is ringing for us right now (placed while the app was closed or reconnecting).
+    // Done here, after the listeners above exist, so the replayed invite can't arrive before anyone is listening.
+    const askForPendingCalls = () => socket.emit("call:pending");
+    socket.on("connect", askForPendingCalls);
+    if (socket.connected) askForPendingCalls();
+    socket.on("call:updated", onUpdated);
+
     socket.on("call:invite", onInvite);
     socket.on("call:signal", onSignal);
     return () => {
       socket.off("call:invite", onInvite);
       socket.off("call:signal", onSignal);
+      socket.off("call:updated", onUpdated);
+      socket.off("connect", askForPendingCalls);
     };
-  }, [socket, user, hasCallPermission, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, ensureLocalStream, createPeer, sendSignal, refreshParticipantsState, finalizeCallLog, cleanup]);
+  }, [socket, user, hasCallPermission, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, ensureLocalStream, refreshIceServers, createPeer, sendSignal, refreshParticipantsState, finalizeCallLog, cleanup]);
 
   return (
     <CallContext.Provider value={{

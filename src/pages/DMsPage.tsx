@@ -3,13 +3,13 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import * as friendsApi from "@/api/friends";
 import * as roomsApi from "@/api/rooms";
-import * as messagesApi from "@/api/messages";
+import { useSocket } from "@/sockets/SocketContext";
 import { useNotificationContext } from "@/contexts/NotificationContext";
 import { useUnreadCalls } from "@/hooks/useUnreadCalls";
 
 import BottomNav from "@/components/BottomNav";
 import UserAvatar from "@/components/UserAvatar";
-import { UserPlus, MoreVertical, MessageCircle, Search, Plus } from "lucide-react";
+import { UserPlus, MoreVertical, MessageCircle, Search, Plus, Check, CheckCheck, PhoneMissed } from "lucide-react";
 import { toast } from "sonner";
 import AdBanner from "@/components/AdBanner";
 import TickerBanner from "@/components/TickerBanner";
@@ -23,6 +23,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+type Tick = "sent" | "delivered" | "read";
+
 interface Friend {
   friendId: string;
   roomId?: string;
@@ -34,6 +36,33 @@ interface Friend {
   };
   lastMessage?: string | null;
   lastMessageTime?: string | null;
+  /** Ticks to show in front of the preview when the last thing in the chat is a message YOU sent. */
+  lastTick?: Tick;
+  /** The last thing in the chat is a call you didn't get to answer. */
+  lastIsMissedCall?: boolean;
+  unread: number;
+}
+
+function messagePreview(type: string, content: string | null): string {
+  switch (type) {
+    case "image": return "📷 Photo";
+    case "audio": return "🎤 Voice note";
+    case "video": return "🎬 Video";
+    case "shared_post":
+    case "shared_page_post": return "🔗 Shared a post";
+    default: return content || "";
+  }
+}
+
+function callPreview(call: roomsApi.DmSummary["last_call"] & {}, myId: string): { text: string; missed: boolean } {
+  const kind = call.call_type === "video" ? "video" : "voice";
+  const outgoing = call.caller_id === myId;
+  switch (call.status) {
+    case "answered": return { text: `${outgoing ? "Outgoing" : "Incoming"} ${kind} call`, missed: false };
+    case "missed": return outgoing ? { text: "No answer", missed: false } : { text: `Missed ${kind} call`, missed: true };
+    case "cancelled": return outgoing ? { text: "Cancelled call", missed: false } : { text: `Missed ${kind} call`, missed: true };
+    default: return { text: outgoing ? "Call declined" : "Declined call", missed: false };
+  }
 }
 
 export default function DMsPage() {
@@ -57,6 +86,7 @@ export default function DMsPage() {
     unreadCounts,
   } = useNotificationContext();
   const navigate = useNavigate();
+  const socket = useSocket();
   const { unreadCallsByRoom } = useUnreadCalls();
   const [friends, setFriends] = useState<Friend[]>([]);
   const [pendingCount, setPendingCount] = useState(0);
@@ -76,6 +106,30 @@ export default function DMsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
+  // Keep the list live: a new message or call update refreshes it (batched), and so does coming back to the tab.
+  useEffect(() => {
+    if (!user) return;
+    let timer: number | undefined;
+    const refreshSoon = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void fetchFriends(), 500);
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") refreshSoon(); };
+    socket?.on("message:notify", refreshSoon);
+    socket?.on("call:updated", refreshSoon);
+    socket?.io.on("reconnect", refreshSoon);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearTimeout(timer);
+      socket?.off("message:notify", refreshSoon);
+      socket?.off("call:updated", refreshSoon);
+      socket?.io.off("reconnect", refreshSoon);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // fetchFriends is a plain function below that reads the current user; re-subscribing on every render would be wasteful.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, user]);
+
   const fetchPendingCount = async () => {
     if (!user) return;
     const requests = await friendsApi.listFriendRequests().catch(() => []);
@@ -84,58 +138,67 @@ export default function DMsPage() {
 
   const fetchFriends = async () => {
     if (!user) return;
-    const profiles = await friendsApi.listFriends().catch(() => []);
+    // Two requests in total, however many friends there are (it used to open every chat and download 50 messages each).
+    const [profiles, summaries] = await Promise.all([
+      friendsApi.listFriends().catch(() => []),
+      roomsApi.getDmSummaries().catch(() => [] as roomsApi.DmSummary[]),
+    ]);
+    const byPeer = new Map(summaries.map((s) => [s.peer_id, s]));
 
-    if (profiles.length > 0) {
-      const friendsWithMessages = await Promise.all(
-        profiles.map(async (prof) => {
-          let lastMessage: string | null = null;
-          let lastMessageTime: string | null = null;
-          let roomId: string | undefined;
+    const rows: Friend[] = profiles.map((prof) => {
+      const sum = byPeer.get(prof.user_id);
+      const msg = sum?.last_message ?? null;
+      const call = sum?.last_call ?? null;
+      let lastMessage: string | null = null;
+      let lastMessageTime: string | null = null;
+      let lastTick: Tick | undefined;
+      let lastIsMissedCall = false;
 
-          try {
-            const room = await roomsApi.getOrCreateDmRoom(prof.user_id);
-            roomId = room.id;
-            const msgs = await messagesApi.listMessages(room.id);
-            const msg = msgs[msgs.length - 1];
-            if (msg) {
-              lastMessage =
-                msg.type === "image" ? "📷 Photo" : msg.type === "audio" ? "🎤 Voice note" : msg.content;
-              lastMessageTime = msg.created_at;
-            }
-          } catch {
-            // blocked / error
-          }
+      const callIsNewer = call && (!msg || new Date(call.created_at).getTime() > new Date(msg.created_at).getTime());
+      if (callIsNewer && call) {
+        const c = callPreview(call, user.id);
+        lastMessage = c.text;
+        lastIsMissedCall = c.missed;
+        lastMessageTime = call.created_at;
+      } else if (msg) {
+        lastMessage = messagePreview(msg.type, msg.content);
+        lastMessageTime = msg.created_at;
+        if (msg.sender_id === user.id) {
+          const sentAt = new Date(msg.created_at).getTime();
+          if (sum?.peer_last_read_at && sentAt <= new Date(sum.peer_last_read_at).getTime()) lastTick = "read";
+          else if (sum?.peer_last_delivered_at && sentAt <= new Date(sum.peer_last_delivered_at).getTime()) lastTick = "delivered";
+          else lastTick = "sent";
+        }
+      }
 
-          return {
-            friendId: prof.user_id,
-            roomId,
-            profile: { display_name: prof.display_name, username: prof.username, avatar_url: prof.avatar_url, is_online: prof.is_online },
-            lastMessage,
-            lastMessageTime,
-          };
-        })
-      );
+      return {
+        friendId: prof.user_id,
+        roomId: sum?.room_id,
+        profile: { display_name: prof.display_name, username: prof.username, avatar_url: prof.avatar_url, is_online: prof.is_online },
+        lastMessage,
+        lastMessageTime,
+        lastTick,
+        lastIsMissedCall,
+        unread: sum?.unread ?? 0,
+      };
+    });
 
-      friendsWithMessages.sort((a, b) => {
-        if (!a.lastMessageTime && !b.lastMessageTime) return 0;
-        if (!a.lastMessageTime) return 1;
-        if (!b.lastMessageTime) return -1;
-        return (
-          new Date(b.lastMessageTime).getTime() - new Date(a.lastMessageTime).getTime()
-        );
-      });
+    rows.sort((a, b) => {
+      if (!a.lastMessageTime && !b.lastMessageTime) return 0;
+      if (!a.lastMessageTime) return 1;
+      if (!b.lastMessageTime) return -1;
+      return new Date(b.lastMessageTime).getTime() - new Date(a.lastMessageTime).getTime();
+    });
 
-      setFriends(friendsWithMessages);
-    } else {
-      setFriends([]);
-    }
+    setFriends(rows);
     setLoading(false);
   };
 
   const startDM = async (friendId: string) => {
     if (!user) return;
     clearDmUnread(friendId);
+    const known = friends.find((f) => f.friendId === friendId)?.roomId;
+    if (known) { navigate(`/room/${known}`); return; }
     try {
       const room = await roomsApi.getOrCreateDmRoom(friendId);
       navigate(`/room/${room.id}`);
@@ -148,12 +211,12 @@ export default function DMsPage() {
     if (!iso) return "";
     const d = new Date(iso);
     const now = new Date();
-    const diff = now.getTime() - d.getTime();
-    if (diff < 60000) return "now";
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
-    if (diff < 7 * 86400000) return "Yesterday";
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+    if (days <= 0) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (days === 1) return "Yesterday";
+    if (days < 7) return d.toLocaleDateString([], { weekday: "long" });
+    return d.toLocaleDateString([], { day: "2-digit", month: "2-digit", year: "numeric" });
   };
 
   const filteredFriends = useMemo(() => {
@@ -316,7 +379,7 @@ export default function DMsPage() {
           <div className="space-y-1">
             {filteredFriends.map((f) => {
               const unread =
-                (f.roomId ? unreadCounts[f.roomId] : 0) || dmUnreads[f.friendId] || 0;
+                (f.roomId ? unreadCounts[f.roomId] : 0) || dmUnreads[f.friendId] || f.unread || 0;
               const missedCalls = f.roomId ? unreadCallsByRoom[f.roomId] || 0 : 0;
               const totalBadgeCount = unread + missedCalls;
               return (
@@ -341,21 +404,34 @@ export default function DMsPage() {
                       >
                         {f.profile.display_name || "User"}
                       </p>
-                      <span className="text-[10px] text-muted-foreground shrink-0 ml-1">
+                      <span className={`text-[11px] shrink-0 ml-1 ${unread > 0 ? "text-primary font-semibold" : "text-muted-foreground"}`}>
                         {formatTime(f.lastMessageTime)}
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
                       <p
-                        className={`text-xs truncate ${
+                        className={`text-xs truncate flex items-center gap-1 ${
                           unread > 0
                             ? "text-foreground font-medium"
                             : "text-muted-foreground"
                         }`}
                       >
-                        {missedCalls > 0
-                          ? `📞 ${missedCalls} missed call${missedCalls > 1 ? "s" : ""}`
-                          : f.lastMessage || (f.profile.is_online ? "Online" : "Tap to chat")}
+                        {missedCalls > 0 ? (
+                          <>
+                            <PhoneMissed className="w-3.5 h-3.5 shrink-0 text-destructive" />
+                            <span className="text-destructive">{`${missedCalls} missed call${missedCalls > 1 ? "s" : ""}`}</span>
+                          </>
+                        ) : (
+                          <>
+                            {f.lastTick === "read" && <CheckCheck className="w-3.5 h-3.5 shrink-0 text-sky-500" />}
+                            {f.lastTick === "delivered" && <CheckCheck className="w-3.5 h-3.5 shrink-0" />}
+                            {f.lastTick === "sent" && <Check className="w-3.5 h-3.5 shrink-0" />}
+                            {f.lastIsMissedCall && <PhoneMissed className="w-3.5 h-3.5 shrink-0 text-destructive" />}
+                            <span className={`truncate ${f.lastIsMissedCall ? "text-destructive" : ""}`}>
+                              {f.lastMessage || (f.profile.is_online ? "Online" : "Tap to chat")}
+                            </span>
+                          </>
+                        )}
                       </p>
                       {totalBadgeCount > 0 && (
                         <span className="ml-2 min-w-[18px] h-[18px] rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center px-1 shrink-0">

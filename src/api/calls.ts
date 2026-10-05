@@ -11,7 +11,7 @@ export async function startCall(roomId: string, calleeId: string, callType: Call
 
 export async function updateCallStatus(
   callId: string,
-  status: "answered" | "declined" | "cancelled" | "missed",
+  status: "answered" | "declined" | "cancelled" | "missed" | "ended",
   durationSeconds?: number
 ): Promise<CallLog> {
   const { data } = await apiClient.patch(`/calls/${callId}`, { status, duration_seconds: durationSeconds });
@@ -26,4 +26,10 @@ export async function listCallLogs(roomId: string): Promise<CallLog[]> {
 export async function listMissedCalls(since?: string | null): Promise<{ id: string; room_id: string; created_at: string }[]> {
   const { data } = await apiClient.get("/calls/missed", { params: since ? { since } : undefined });
   return data;
+}
+
+/** STUN/TURN servers for calls. The backend adds a TURN relay (with short-lived credentials) when one is configured. */
+export async function getIceServers(): Promise<RTCIceServer[]> {
+  const { data } = await apiClient.get("/calls/ice-servers");
+  return Array.isArray(data?.iceServers) ? data.iceServers : [];
 }

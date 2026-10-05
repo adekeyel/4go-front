@@ -30,8 +30,8 @@ export async function getMessagesByIds(roomId: string, ids: string[]): Promise<M
 
 export async function sendMessage(
   roomId: string,
-  input: { type?: Message["type"]; content?: string; media_url?: string; duration?: number; reply_to?: string }
-): Promise<Message> {
+  input: { type?: Message["type"]; content?: string; media_url?: string; duration?: number; reply_to?: string; client_id?: string }
+): Promise<Message & { client_id?: string }> {
   const { data } = await apiClient.post(`/messages/room/${roomId}`, input);
   return data;
 }

@@ -34,7 +34,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { canMakeVoiceCall, canMakeVideoCall } from "@/lib/callPermissions";
 import { useMentionRecorder } from "@/hooks/useMentionRecorder";
 
-type Message = Tables<"messages"> & { edited_at?: string | null; reply_to?: string | null };
+type Message = Tables<"messages"> & { edited_at?: string | null; reply_to?: string | null; client_id?: string };
 type CallLog = Tables<"call_logs">;
 
 interface UserSummary {
@@ -49,7 +49,12 @@ interface UserSummary {
 
 interface MessageWithProfile extends Message {
   profile?: UserSummary;
+  /** Present only on a message that was typed on this device and hasn't been confirmed by the server yet. */
+  local?: { state: "sending" | "failed"; clientId: string };
 }
+
+const newClientId = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 interface ReplyTarget {
   id: string;
@@ -85,6 +90,8 @@ export default function ChatRoomPage() {
   const [onlineCount, setOnlineCount] = useState(0);
   const [dmPeer, setDmPeer] = useState<UserSummary | null>(null);
   const [peerLastReadAt, setPeerLastReadAt] = useState<string | null>(null);
+  const [peerDeliveredAt, setPeerDeliveredAt] = useState<string | null>(null);
+  const readTimerRef = useRef<number | null>(null);
   const [pinnedMessages, setPinnedMessages] = useState<MessageWithProfile[]>([]);
   const [showPinned, setShowPinned] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
@@ -111,6 +118,11 @@ export default function ChatRoomPage() {
   const call = useCallContext();
   const { recordFromText } = useMentionRecorder();
   const savedLastReadRef = useRef<string | null>(null);
+  const forceScrollRef = useRef(false); // after you send something, jump to the bottom even if you'd scrolled up a little
+  const ownSummaryRef = useRef<UserSummary | undefined>(undefined);
+  ownSummaryRef.current = user
+    ? { user_id: user.id, display_name: profile?.display_name ?? null, avatar_url: profile?.avatar_url ?? null, username: profile?.username ?? null, rank: profile?.rank }
+    : undefined;
 
   // On enter: fetch last_read_at FIRST, save it, then mark as read
   useEffect(() => {
@@ -119,13 +131,18 @@ export default function ChatRoomPage() {
     let isActive = true;
     savedLastReadRef.current = null;
     setLastReadAt(null);
+    setPeerLastReadAt(null); // don't show the previous chat's ticks while this one loads
+    setPeerDeliveredAt(null);
     setReadyReadRoomId(null);
 
     const init = async () => {
       setCurrentRoom(roomId);
 
       // 1. Fetch the ORIGINAL last_read_at (and the peer's, for DM ticks) before marking as read.
-      const reads = await roomsApi.listRoomReads(roomId).catch(() => []);
+      const receipts = await roomsApi.getRoomReceipts(roomId).catch(() => null);
+      const reads: roomsApi.RoomReceipt[] =
+        receipts ??
+        (await roomsApi.listRoomReads(roomId).catch(() => [])).map((r) => ({ user_id: r.user_id, last_read_at: r.last_read_at as string | null, last_delivered_at: null }));
       const own = reads.find((r) => r.user_id === user.id);
       const peer = reads.find((r) => r.user_id !== user.id);
       const originalLastRead = own?.last_read_at || null;
@@ -133,7 +150,10 @@ export default function ChatRoomPage() {
 
       savedLastReadRef.current = originalLastRead;
       setLastReadAt(originalLastRead);
-      if (peer) setPeerLastReadAt(peer.last_read_at);
+      if (peer) {
+        setPeerLastReadAt(peer.last_read_at);
+        setPeerDeliveredAt(peer.last_delivered_at);
+      }
 
       // 2. Now mark as read
       await roomsApi.markRoomRead(roomId).catch(() => {});
@@ -164,12 +184,80 @@ export default function ChatRoomPage() {
 
     const refreshInterval = window.setInterval(() => void fetchRoom(), 30000);
 
-    socket.emit("room:join", roomId);
+    // The server forgets which rooms a socket joined whenever the connection drops and comes back (phone sleeps,
+    // wifi blip, server restart). Without re-joining, live messages and typing silently stopped until a reload.
+    const joinRoom = () => socket.emit("room:join", roomId);
+    joinRoom();
+
+    // Pull the newest page and add whatever we missed while disconnected / in the background.
+    const catchUp = async () => {
+      const latest = await messagesApi.listMessages(roomId).catch(() => null);
+      if (!latest || latest.length === 0) return;
+      const withProfiles = await attachProfiles(latest);
+      setMessages((prev) => {
+        const known = new Set(prev.map((m) => m.id));
+        const fresh = withProfiles.filter((m) => !known.has(m.id));
+        if (fresh.length === 0) return prev;
+        const confirmed = prev.filter((m) => !m.local);
+        const newestHave = confirmed.length ? confirmed[confirmed.length - 1].created_at : null;
+        const gap = newestHave !== null && latest[0].created_at > newestHave && latest.length === PAGE_SIZE;
+        // A gap means we were away for more than a page of messages: show the latest page instead of a patchwork.
+        const base = gap ? [] : prev.filter((m) => !m.local);
+        const merged = [...base, ...fresh].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+        if (gap) setHasMore(true);
+        return [...merged, ...prev.filter((m) => m.local)];
+      });
+    };
+    const refreshReceipts = async () => {
+      const r = await roomsApi.getRoomReceipts(roomId).catch(() => null);
+      const peer = r?.find((x) => x.user_id !== user.id);
+      if (peer) {
+        setPeerLastReadAt(peer.last_read_at);
+        setPeerDeliveredAt(peer.last_delivered_at);
+      }
+    };
+    // While you're looking at the chat, what the other person sends counts as read right away (so THEIR ticks
+    // turn blue now, not only when you leave the chat). Batched so a burst of messages makes one request.
+    const markReadSoon = () => {
+      if (readTimerRef.current) return;
+      readTimerRef.current = window.setTimeout(() => {
+        readTimerRef.current = null;
+        roomsApi.markRoomRead(roomId).then(() => refetchUnreads()).catch(() => {});
+      }, 800);
+    };
+    const onReconnected = () => { joinRoom(); void catchUp(); void fetchCallLogs(); void refreshReceipts(); };
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      void catchUp();
+      void refreshReceipts();
+      markReadSoon();
+    };
+    const onDelivered = (p: { roomId: string; userId: string; deliveredAt: string }) => {
+      if (p.roomId !== roomId || p.userId === user.id) return;
+      setPeerDeliveredAt((prev) => (!prev || new Date(p.deliveredAt).getTime() > new Date(prev).getTime() ? p.deliveredAt : prev));
+    };
+    socket.on("room:delivered", onDelivered);
+    socket.on("connect", joinRoom);
+    socket.io.on("reconnect", onReconnected);
+    document.addEventListener("visibilitychange", onVisible);
 
     const onNewMessage = async (newMsg: Message) => {
       if (newMsg.room_id !== roomId) return;
-      const profiles = await profilesApi.getProfilesByIds([newMsg.sender_id]).catch(() => []);
-      setMessages((prev) => (prev.some((m) => m.id === newMsg.id) ? prev : [...prev, { ...newMsg, profile: profiles[0] || undefined }]));
+      const mine = newMsg.sender_id === user.id;
+      if (!mine && document.visibilityState === "visible") markReadSoon();
+      const profiles = mine ? [] : await profilesApi.getProfilesByIds([newMsg.sender_id]).catch(() => []);
+      const sender = mine ? ownSummaryRef.current : profiles[0] || undefined;
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === newMsg.id)) return prev;
+        // This is the saved copy of a message we're already showing as "sending": swap it in, don't add a second.
+        const pending = newMsg.client_id ? prev.findIndex((m) => m.local?.clientId === newMsg.client_id) : -1;
+        if (pending >= 0) {
+          const next = [...prev];
+          next[pending] = { ...newMsg, profile: prev[pending].profile ?? sender };
+          return next;
+        }
+        return [...prev, { ...newMsg, profile: sender }];
+      });
     };
     const onEditMessage = (u: Message) => {
       if (u.room_id !== roomId) return;
@@ -199,6 +287,11 @@ export default function ChatRoomPage() {
 
     return () => {
       window.clearInterval(refreshInterval);
+      socket.off("connect", joinRoom);
+      socket.off("room:delivered", onDelivered);
+      if (readTimerRef.current) { window.clearTimeout(readTimerRef.current); readTimerRef.current = null; }
+      socket.io.off("reconnect", onReconnected);
+      document.removeEventListener("visibilitychange", onVisible);
       socket.emit("room:leave", roomId);
       socket.off("message:new", onNewMessage);
       socket.off("message:edit", onEditMessage);
@@ -269,8 +362,9 @@ export default function ChatRoomPage() {
       const container = messagesContainerRef.current;
       if (container) {
         const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
-        if (isNearBottom) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        if (isNearBottom || forceScrollRef.current) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
       }
+      forceScrollRef.current = false;
     }
   }, [messages]);
 
@@ -422,6 +516,38 @@ export default function ChatRoomPage() {
     }
   }, []);
 
+  // Sends one locally-shown message to the server. Success: swap in the saved copy. Network failure: keep it on
+  // screen marked "Not sent" with Retry. A refusal from the server (blocked, suspended...): say why and remove it.
+  const deliverLocal = async (localMsg: MessageWithProfile) => {
+    if (!roomId || !localMsg.local) return;
+    const { clientId } = localMsg.local;
+    try {
+      const sent = await messagesApi.sendMessage(roomId, {
+        type: localMsg.type as Message["type"],
+        content: localMsg.type === "text" ? localMsg.content ?? undefined : undefined,
+        media_url: localMsg.media_url || undefined,
+        duration: localMsg.duration || undefined,
+        reply_to: localMsg.reply_to || undefined,
+        client_id: clientId,
+      });
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === sent.id)) return prev.filter((m) => m.id !== localMsg.id); // the live copy got here first
+        return prev.map((m) => (m.id === localMsg.id ? { ...sent, profile: m.profile } : m));
+      });
+      if (localMsg.type === "text" && localMsg.content) {
+        void recordFromText(localMsg.content, { sourceType: "message", sourceId: sent.id, contextId: roomId });
+      }
+    } catch (err) {
+      console.error("Message send error:", err);
+      if (axios.isAxiosError(err) && err.response) {
+        toast.error(apiErrorMessage(err, "Failed to send message"));
+        setMessages((prev) => prev.filter((m) => m.id !== localMsg.id));
+      } else {
+        setMessages((prev) => prev.map((m) => (m.id === localMsg.id && m.local ? { ...m, local: { ...m.local, state: "failed" } } : m)));
+      }
+    }
+  };
+
   const sendMessage = async (content: string, type: "text" | "image" | "audio" | "video" = "text", mediaUrl?: string, duration?: number, replyTo?: string) => {
     if (!roomId || !user) return;
     if (isMuted) { toast.error("You are muted in this room"); return; }
@@ -429,22 +555,34 @@ export default function ChatRoomPage() {
       toast.error("This is a broadcast-only channel");
       return;
     }
-    try {
-      const sent = await messagesApi.sendMessage(roomId, {
-        type,
-        content: type === "text" ? content : undefined,
-        media_url: mediaUrl || undefined,
-        duration: duration || undefined,
-        reply_to: replyTo,
-      });
-      if (type === "text" && content) {
-        void recordFromText(content, { sourceType: "message", sourceId: sent.id, contextId: roomId });
-      }
-    } catch (err) {
-      console.error("Message send error:", err);
-      toast.error(apiErrorMessage(err, "Failed to send message"));
-    }
+    const clientId = newClientId();
+    const localMsg: MessageWithProfile = {
+      id: `local-${clientId}`,
+      room_id: roomId,
+      sender_id: user.id,
+      type,
+      content: type === "text" ? content : null,
+      media_url: mediaUrl ?? null,
+      duration: duration ?? null,
+      created_at: new Date().toISOString(),
+      reply_to: replyTo ?? null,
+      profile: ownSummaryRef.current,
+      local: { state: "sending", clientId },
+    } as MessageWithProfile;
+    forceScrollRef.current = true;
+    setMessages((prev) => [...prev, localMsg]);
+    await deliverLocal(localMsg);
   };
+
+  const retryLocal = (id: string) => {
+    const msg = messages.find((m) => m.id === id);
+    if (!msg?.local) return;
+    const resending = { ...msg, local: { ...msg.local, state: "sending" as const } };
+    setMessages((prev) => prev.map((m) => (m.id === id ? resending : m)));
+    void deliverLocal(resending);
+  };
+
+  const discardLocal = (id: string) => setMessages((prev) => prev.filter((m) => m.id !== id));
 
   const editMessage = async (messageId: string, content: string) => {
     if (!user) return;
@@ -725,11 +863,14 @@ export default function ChatRoomPage() {
               showHeader = !sameSenderRecently;
               grouped = sameSenderRecently;
 
-              if (entry.item.sender_id === user?.id) {
+              if (entry.item.sender_id === user?.id && !entry.item.local) {
                 if (room?.type === "dm") {
-                  status = peerLastReadAt && entry.created_at <= peerLastReadAt ? "read" : "delivered";
+                  const sentAt = new Date(entry.created_at).getTime();
+                  if (peerLastReadAt && sentAt <= new Date(peerLastReadAt).getTime()) status = "read";
+                  else if (peerDeliveredAt && sentAt <= new Date(peerDeliveredAt).getTime()) status = "delivered";
+                  else status = "sent";
                 } else {
-                  status = "delivered";
+                  status = "sent"; // per-member delivery isn't tracked for group rooms
                 }
               }
               prevMessageEntry = entry;
@@ -777,6 +918,9 @@ export default function ChatRoomPage() {
                       status={status}
                       showHeader={showHeader}
                       grouped={grouped}
+                      localState={entry.item.local?.state}
+                      onRetry={() => retryLocal(entry.item.id)}
+                      onDiscard={() => discardLocal(entry.item.id)}
                     />
                   </div>
                 )}

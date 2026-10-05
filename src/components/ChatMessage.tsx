@@ -6,7 +6,7 @@ import MessageReactions from "@/components/MessageReactions";
 import { Tables } from "@/types/database";
 import { recordMessageView, getMessageViewCounts } from "@/api/messages";
 import { useAuth } from "@/contexts/AuthContext";
-import { Check, CheckCheck, CornerUpLeft, Eye, Flag, Gift, Mic, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";
+import { AlertCircle, Check, CheckCheck, Clock, CornerUpLeft, Eye, Flag, Gift, Mic, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";
 import { RankBadge } from "./RankBadge";
 import UserAvatar from "./UserAvatar";
 import UserProfilePreview from "./UserProfilePreview";
@@ -55,9 +55,13 @@ interface ChatMessageProps {
   showHeader?: boolean;
   /** Whether this bubble is tucked into a run of consecutive messages from the same sender — tighter spacing. */
   grouped?: boolean;
+  /** Set while the message is still being sent from this device ("sending") or couldn't be sent ("failed"). */
+  localState?: "sending" | "failed";
+  onRetry?: () => void;
+  onDiscard?: () => void;
 }
 
-export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, onDelete, onReport, onBlockUser, onPin, onReply, isPinned, replyInfo, onScrollToMessage, status, showHeader = true, grouped = false }: ChatMessageProps) {
+export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, onDelete, onReport, onBlockUser, onPin, onReply, isPinned, replyInfo, onScrollToMessage, status, showHeader = true, grouped = false, localState, onRetry, onDiscard }: ChatMessageProps) {
   const { user } = useAuth();
   const time = new Date(message.created_at).toLocaleTimeString([], {
     hour: "2-digit",
@@ -104,7 +108,7 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
 
   // For own monetized content, fetch view count
   useEffect(() => {
-    if (!isOwn || !isViewEligible) return;
+    if (!isOwn || !isViewEligible || localState) return;
     const fetchCount = async () => {
       try {
         const counts = await getMessageViewCounts(roomId ?? message.room_id, [message.id]);
@@ -114,7 +118,7 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
       }
     };
     fetchCount();
-  }, [message.id, isOwn, isViewEligible]);
+  }, [message.id, isOwn, isViewEligible, localState]);
 
   if (message.type === "system") {
     return (
@@ -168,7 +172,7 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
         )}
         <div className={`rounded-2xl px-3 py-2 relative ${isOwn ? `bubble-sent ${grouped ? "rounded-br-2xl" : "rounded-br-md"}` : `bubble-received shadow-card ${grouped ? "rounded-bl-2xl" : "rounded-bl-md"}`}`}>
           {isPinned && <div className="absolute -top-2 right-2"><Pin className="w-3 h-3 text-primary" /></div>}
-          <div className="mb-1 flex items-start justify-end gap-2">
+          {!localState && <div className="mb-1 flex items-start justify-end gap-2">
             <div className="flex-1" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -190,7 +194,7 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
                 {isAdmin && onPin && <DropdownMenuItem onClick={() => onPin(message.id)}><Pin className="mr-2 h-4 w-4" />{isPinned ? "Unpin" : "Pin message"}</DropdownMenuItem>}
               </DropdownMenuContent>
             </DropdownMenu>
-          </div>
+          </div>}
 
           {replyPreview}
 
@@ -244,7 +248,8 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
             </div>
             <p className="text-[9px] text-muted-foreground text-right flex-1 flex items-center justify-end gap-0.5">
               {message.edited_at ? "edited • " : ""}{time}
-              {isOwn && status && (
+              {isOwn && localState === "sending" && <Clock className="w-3 h-3 text-muted-foreground" aria-label="Sending" />}
+              {isOwn && !localState && status && (
                 status === "read" ? (
                   <CheckCheck className="w-3.5 h-3.5 text-sky-500" aria-label="Read" />
                 ) : status === "delivered" ? (
@@ -256,7 +261,14 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
             </p>
           </div>
         </div>
-        {message.type !== "system" && (
+        {localState === "failed" && (
+          <div className="mt-1 flex items-center justify-end gap-3 text-[11px] text-destructive">
+            <span className="inline-flex items-center gap-1"><AlertCircle className="w-3.5 h-3.5" />Not sent</span>
+            <button onClick={onRetry} className="font-semibold underline">Retry</button>
+            <button onClick={onDiscard} className="text-muted-foreground underline">Delete</button>
+          </div>
+        )}
+        {message.type !== "system" && !localState && (
           <MessageReactions messageId={message.id} isOwn={isOwn} />
         )}
       </div>

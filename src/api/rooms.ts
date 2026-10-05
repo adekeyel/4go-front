@@ -111,6 +111,34 @@ export async function listRoomReads(roomId: string): Promise<RoomRead[]> {
   return data;
 }
 
+/** When each member last read the room, and when messages last reached one of their devices (drives the ticks). */
+export interface RoomReceipt {
+  user_id: string;
+  last_read_at: string | null;
+  last_delivered_at: string | null;
+}
+
+export async function getRoomReceipts(roomId: string): Promise<RoomReceipt[]> {
+  const { data } = await apiClient.get(`/rooms/${roomId}/receipts`);
+  return data;
+}
+
+/** One row of the DM list, from a single request (see GET /rooms/dms/summary on the backend). */
+export interface DmSummary {
+  room_id: string;
+  peer_id: string;
+  last_message: { id: string; sender_id: string; type: string; content: string | null; created_at: string } | null;
+  last_call: { id: string; caller_id: string; callee_id: string; call_type: string; status: string; duration_seconds: number; created_at: string } | null;
+  unread: number;
+  peer_last_read_at: string | null;
+  peer_last_delivered_at: string | null;
+}
+
+export async function getDmSummaries(): Promise<DmSummary[]> {
+  const { data } = await apiClient.get("/rooms/dms/summary");
+  return data;
+}
+
 export async function listPinnedMessages(roomId: string) {
   const { data } = await apiClient.get(`/rooms/${roomId}/pinned`);
   return data;
