@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import VoiceNotePlayer from "@/components/VoiceNotePlayer";
 import { renderRichText } from "@/lib/mentions";
 import SharedPostMessage from "@/components/feed/SharedPostMessage";
 import SharedPagePostMessage from "@/components/feed/SharedPagePostMessage";
@@ -6,7 +7,7 @@ import MessageReactions from "@/components/MessageReactions";
 import { Tables } from "@/types/database";
 import { recordMessageView, getMessageViewCounts } from "@/api/messages";
 import { useAuth } from "@/contexts/AuthContext";
-import { AlertCircle, Check, CheckCheck, Clock, CornerUpLeft, Eye, Flag, Gift, Mic, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";
+import { AlertCircle, Check, CheckCheck, Clock, CornerUpLeft, Eye, Flag, Gift, MoreVertical, Pencil, Pin, ShieldBan, Trash2, X } from "lucide-react";
 import { RankBadge } from "./RankBadge";
 import UserAvatar from "./UserAvatar";
 import UserProfilePreview from "./UserProfilePreview";
@@ -227,11 +228,7 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
             </button>
           )}
           {message.type === "audio" && message.media_url && (
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-full gradient-primary flex items-center justify-center"><Mic className="w-4 h-4 text-primary-foreground" /></div>
-              <audio controls src={message.media_url} className="h-8 max-w-[200px]" />
-              {message.duration && <span className="text-[10px] text-muted-foreground">{message.duration}s</span>}
-            </div>
+            <VoiceNotePlayer src={message.media_url} duration={message.duration} />
           )}
           <div className="flex items-center justify-between mt-0.5">
             <div className="flex items-center gap-2">

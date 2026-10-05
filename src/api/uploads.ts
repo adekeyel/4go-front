@@ -3,6 +3,8 @@ import { apiClient } from "@/lib/apiClient";
 export interface UploadResult {
   url: string;
   publicId: string;
+  /** Seconds, measured by Cloudinary. Only present for audio/video. */
+  duration?: number;
 }
 
 export async function uploadFile(file: File | Blob, folder: string, filename?: string): Promise<UploadResult> {
