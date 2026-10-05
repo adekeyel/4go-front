@@ -53,7 +53,7 @@
     --shadow-elevated: 0 8px 30px -8px hsl(150 20% 20% / 0.15);
     --online-color: 145 72% 50%;
     --offline-color: 0 0% 70%;
-    --sent-bubble: 145 50% 92%;
+    --sent-bubble: 111 86% 91%;
     --received-bubble: 0 0% 100%;
   }
 
@@ -77,8 +77,8 @@
     --border: 150 12% 18%;
     --input: 150 12% 18%;
     --ring: 145 72% 45%;
-    --sent-bubble: 145 40% 18%;
-    --received-bubble: 150 15% 14%;
+    --sent-bubble: 168 100% 18%;
+    --received-bubble: 203 21% 16%;
   }
 }
 
@@ -186,6 +186,25 @@
   }
   .bubble-received {
     background-color: hsl(var(--received-bubble));
+  }
+  /* Speech-bubble tails (first bubble of a run) */
+  .bubble-tail-out::after,
+  .bubble-tail-in::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    width: 8px;
+    height: 13px;
+  }
+  .bubble-tail-out::after {
+    right: -8px;
+    background-color: hsl(var(--sent-bubble));
+    clip-path: polygon(0 0, 0 100%, 100% 0);
+  }
+  .bubble-tail-in::after {
+    left: -8px;
+    background-color: hsl(var(--received-bubble));
+    clip-path: polygon(100% 0, 100% 100%, 0 0);
   }
 }
 

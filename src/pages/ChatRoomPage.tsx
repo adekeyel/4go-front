@@ -918,6 +918,8 @@ export default function ChatRoomPage() {
                       status={status}
                       showHeader={showHeader}
                       grouped={grouped}
+                      showSenderName={room?.type !== "dm"}
+                      showAvatar={room?.type !== "dm"}
                       localState={entry.item.local?.state}
                       onRetry={() => retryLocal(entry.item.id)}
                       onDiscard={() => discardLocal(entry.item.id)}
