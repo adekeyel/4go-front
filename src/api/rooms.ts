@@ -124,7 +124,7 @@ export async function getRoomReceipts(roomId: string): Promise<RoomReceipt[]> {
 }
 
 /** One row of the DM list, from a single request (see GET /rooms/dms/summary on the backend). */
-export interface DmSummary {
+export interface DmSummary extends ChatPrefs {
   room_id: string;
   peer_id: string;
   last_message: { id: string; sender_id: string; type: string; content: string | null; created_at: string; deleted_at?: string | null } | null;
@@ -132,6 +132,32 @@ export interface DmSummary {
   unread: number;
   peer_last_read_at: string | null;
   peer_last_delivered_at: string | null;
+}
+
+/** Per-person chat settings. muted_until is only set while a mute is still running. */
+export interface ChatPrefs {
+  pinned_at: string | null;
+  muted_until: string | null;
+  archived: boolean;
+  /** "Clear chat": everything up to this moment is hidden for me. */
+  cleared_at: string | null;
+}
+
+export type MuteChoice = "off" | "8h" | "1w" | "forever";
+
+export async function getChatPrefs(): Promise<(ChatPrefs & { room_id: string })[]> {
+  const { data } = await apiClient.get("/rooms/prefs");
+  return data;
+}
+
+export async function updateChatPrefs(roomId: string, patch: { pinned?: boolean; archived?: boolean; muted?: MuteChoice }): Promise<ChatPrefs & { room_id: string }> {
+  const { data } = await apiClient.put(`/rooms/${roomId}/prefs`, patch);
+  return data;
+}
+
+export async function clearChat(roomId: string): Promise<ChatPrefs & { room_id: string }> {
+  const { data } = await apiClient.post(`/rooms/${roomId}/clear`);
+  return data;
 }
 
 export async function getDmSummaries(): Promise<DmSummary[]> {

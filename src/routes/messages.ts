@@ -10,6 +10,7 @@ import { pushNewMessage } from "@/lib/push";
 import { deleteMessagesCascade } from "@/lib/cleanup";
 import { deliverToOnlineRecipients } from "@/lib/delivery";
 import { canDeleteForEveryone } from "@/lib/messageRules";
+import { clearedAtFor, mutedUserIds, unarchiveOnNewMessage } from "@/lib/chatPrefs";
 
 export const messagesRouter = Router();
 messagesRouter.use(requireAuth);
@@ -26,8 +27,13 @@ messagesRouter.get(
     await assertRoomMember(req.params.roomId, req.userId!);
     const before = typeof req.query.before === "string" ? new Date(req.query.before) : undefined;
     const hidden = await hiddenMessageIds(req.params.roomId, req.userId!);
+    const floor = await clearedAtFor(req.params.roomId, req.userId!); // "Clear chat": nothing older than this is shown
     const messages = await prisma.messages.findMany({
-      where: { room_id: req.params.roomId, ...(hidden.length ? { id: { notIn: hidden } } : {}), ...(before ? { created_at: { lt: before } } : {}) },
+      where: {
+        room_id: req.params.roomId,
+        ...(hidden.length ? { id: { notIn: hidden } } : {}),
+        ...(before || floor ? { created_at: { ...(before ? { lt: before } : {}), ...(floor ? { gt: floor } : {}) } } : {}),
+      },
       orderBy: { created_at: "desc" },
       take: 50,
     });
@@ -58,14 +64,16 @@ messagesRouter.get(
     if (!target || target.room_id !== req.params.roomId) throw new ApiError(404, "Message not found");
     const hidden = await hiddenMessageIds(req.params.roomId, req.userId!);
     const notHidden = hidden.length ? { id: { notIn: hidden } } : {};
+    const floorAt = await clearedAtFor(req.params.roomId, req.userId!);
+    const aboveFloor = floorAt ? { gt: floorAt } : {};
     const [before25, after25] = await Promise.all([
       prisma.messages.findMany({
-        where: { room_id: req.params.roomId, ...notHidden, created_at: { lt: target.created_at } },
+        where: { room_id: req.params.roomId, ...notHidden, created_at: { lt: target.created_at, ...aboveFloor } },
         orderBy: { created_at: "desc" },
         take: 25,
       }),
       prisma.messages.findMany({
-        where: { room_id: req.params.roomId, ...notHidden, created_at: { gte: target.created_at } },
+        where: { room_id: req.params.roomId, ...notHidden, created_at: { gte: target.created_at, ...aboveFloor } },
         orderBy: { created_at: "asc" },
         take: 25,
       }),
@@ -85,11 +93,15 @@ messagesRouter.get(
     const after = typeof req.query.after === "string" ? new Date(req.query.after) : null;
     const hidden = await hiddenMessageIds(req.params.roomId, req.userId!);
     const notHidden = hidden.length ? { id: { notIn: hidden } } : {};
+    const clearedAt = await clearedAtFor(req.params.roomId, req.userId!);
+    const aboveFloor = clearedAt ? { gt: clearedAt } : {};
+    // Unread starts after whichever is later: the last time they read, or the last time they cleared the chat.
+    const since = after && clearedAt ? (after > clearedAt ? after : clearedAt) : after ?? clearedAt;
 
-    if (after) {
+    if (since) {
       // A message someone already deleted for everyone isn't "unread" any more.
       const firstUnread = await prisma.messages.findFirst({
-        where: { room_id: req.params.roomId, ...notHidden, deleted_at: null, created_at: { gt: after }, sender_id: { not: req.userId! } },
+        where: { room_id: req.params.roomId, ...notHidden, deleted_at: null, created_at: { gt: since }, sender_id: { not: req.userId! } },
         orderBy: { created_at: "asc" },
       });
       if (firstUnread) {
@@ -98,14 +110,14 @@ messagesRouter.get(
             where: { room_id: req.params.roomId, ...notHidden, created_at: { gte: firstUnread.created_at } },
             orderBy: { created_at: "asc" },
           }),
-          prisma.messages.count({ where: { room_id: req.params.roomId, ...notHidden, created_at: { lt: firstUnread.created_at } } }),
+          prisma.messages.count({ where: { room_id: req.params.roomId, ...notHidden, created_at: { lt: firstUnread.created_at, ...aboveFloor } } }),
         ]);
         return res.json({ messages: unreadMessages, hasMore: olderCount > 0 });
       }
     }
 
     const latest = await prisma.messages.findMany({
-      where: { room_id: req.params.roomId, ...notHidden },
+      where: { room_id: req.params.roomId, ...notHidden, ...(clearedAt ? { created_at: { gt: clearedAt } } : {}) },
       orderBy: { created_at: "desc" },
       take: 50,
     });
@@ -192,9 +204,12 @@ messagesRouter.post(
     // have not opened this room), so counts update app-wide without each
     // client subscribing to every room channel.
     const members = await prisma.roomMembers.findMany({ where: { room_id: req.params.roomId }, select: { user_id: true } });
+    await unarchiveOnNewMessage(req.params.roomId).catch(() => {}); // an archived chat pops back to the main list (unless muted)
+    // People who muted this chat still get the message and the unread badge, just no sound / banner / push.
+    const muted = await mutedUserIds(req.params.roomId, members.map((x) => x.user_id)).catch(() => new Set<string>());
     for (const m of members) {
       if (m.user_id !== req.userId!) {
-        emitToUser(m.user_id, "message:notify", { roomId: message.room_id, messageId: message.id, senderId: message.sender_id, createdAt: message.created_at, type: message.type, content: message.content ? message.content.slice(0, 200) : null });
+        emitToUser(m.user_id, "message:notify", { muted: muted.has(m.user_id), roomId: message.room_id, messageId: message.id, senderId: message.sender_id, createdAt: message.created_at, type: message.type, content: message.content ? message.content.slice(0, 200) : null });
       }
     }
     void pushNewMessage(message); // ports notify_push_on_message; never throws, so it can't fail the send

@@ -171,9 +171,16 @@ export function useNotifications() {
 
     // The backend only sends "message:notify" to members of the room, so no
     // client-side membership check is needed.
-    const onMessage = async (msg: { roomId: string; messageId: string; senderId: string; type: string; content: string | null }) => {
+    const onMessage = async (msg: { roomId: string; messageId: string; senderId: string; type: string; content: string | null; muted?: boolean }) => {
       if (msg.senderId === user.id) return;
       if (currentRoomRef.current === msg.roomId) return;
+
+      // A chat I muted: the message still arrives and the DM list still shows its unread badge, but no sound, banner or notification.
+      if (msg.muted) {
+        const mutedRoom = await getCachedRoom(msg.roomId);
+        if (mutedRoom?.type === "dm") setDmUnreads((prev) => ({ ...prev, [msg.senderId]: (prev[msg.senderId] || 0) + 1 }));
+        return;
+      }
 
       setUnreadMessages((prev) => prev + 1);
 

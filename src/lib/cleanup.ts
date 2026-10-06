@@ -25,6 +25,7 @@ export async function deleteRoomCascade(tx: Tx, roomId: string) {
   await tx.roomReads.deleteMany({ where: { room_id: roomId } });
   await tx.roomJoinRequests.deleteMany({ where: { room_id: roomId } });
   await tx.mutedMembers.deleteMany({ where: { room_id: roomId } });
+  await tx.chatPrefs.deleteMany({ where: { room_id: roomId } });
   await tx.pinnedMessages.deleteMany({ where: { room_id: roomId } });
   await tx.callLogs.deleteMany({ where: { room_id: roomId } });
   await tx.giftTransactions.updateMany({ where: { room_id: roomId }, data: { room_id: null } });

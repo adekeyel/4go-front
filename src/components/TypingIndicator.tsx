@@ -2,26 +2,18 @@ interface TypingIndicatorProps {
   typingUsers: { userId: string; displayName: string }[];
 }
 
+/** Small "…" bubble at the bottom of the chat while someone types. The header carries the "typing…" text. */
 export default function TypingIndicator({ typingUsers }: TypingIndicatorProps) {
   if (typingUsers.length === 0) return null;
-
-  const names =
-    typingUsers.length === 1
-      ? typingUsers[0].displayName
-      : typingUsers.length === 2
-      ? `${typingUsers[0].displayName} and ${typingUsers[1].displayName}`
-      : `${typingUsers[0].displayName} and ${typingUsers.length - 1} others`;
-
   return (
-    <div className="flex items-center gap-2 px-4 py-1.5 animate-fade-in">
-      <div className="flex gap-0.5">
-        <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
-        <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
-        <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
+    <div className="mt-2 flex justify-start animate-fade-in" role="status" aria-label="Typing">
+      <div className="bubble-received bubble-tail-in rounded-lg rounded-tl-none px-3 py-2.5 shadow-[0_1px_0.5px_rgba(11,20,26,0.13)] relative">
+        <div className="flex gap-1 items-center h-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:0ms]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:150ms]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:300ms]" />
+        </div>
       </div>
-      <span className="text-xs text-muted-foreground italic">
-        {names} {typingUsers.length === 1 ? "is" : "are"} typing...
-      </span>
     </div>
   );
 }

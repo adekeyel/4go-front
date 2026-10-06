@@ -16,12 +16,13 @@ import UserAvatar from "@/components/UserAvatar";
 
 import ReportDialog from "@/components/ReportDialog";
 import { useCallContext } from "@/contexts/CallContext";
-import { ArrowLeft, ChevronDown, Flag, MoreVertical, Phone, Video, ShieldBan, Users, Pin, X } from "lucide-react";
+import { ArrowLeft, Bell, BellOff, ChevronDown, Eraser, Flag, MoreVertical, Phone, Video, ShieldBan, Users, Pin, X } from "lucide-react";
 import { formatLastSeen } from "@/lib/lastSeen";
 import { toast } from "sonner";
 import { Tables } from "@/types/database";
 import CallLogSystemMessage from "@/components/CallLogSystemMessage";
 import ForwardDialog from "@/components/ForwardDialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import AclibBanner from "@/components/AclibBanner";
 import SponsorFooterBanner from "@/components/monetization/SponsorFooterBanner";
 import AdSlot from "@/components/ads/AdSlot";
@@ -29,6 +30,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { blockUser, submitModerationReport } from "@/lib/safety";
@@ -111,6 +115,8 @@ export default function ChatRoomPage() {
   const isInitialLoad = useRef(true);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [forwardMessage, setForwardMessage] = useState<MessageWithProfile | null>(null);
+  const [prefs, setPrefs] = useState<roomsApi.ChatPrefs | null>(null); // my mute / clear-chat settings for this room
+  const [clearOpen, setClearOpen] = useState(false);
   const [awayUnread, setAwayUnread] = useState(0); // new messages from others that arrived while scrolled up
   const prevLastMessageIdRef = useRef<string | null>(null);
   const navigate = useNavigate();
@@ -278,6 +284,16 @@ export default function ChatRoomPage() {
       setMessages((prev) => prev.map((m) => (m.id === d.id ? { ...m, deleted_at: d.deleted_at, content: null, media_url: null, duration: null, edited_at: null } : m)));
       setPinnedMessages((prev) => prev.filter((m) => m.id !== d.id));
     };
+    // "Clear chat" done on another tab/device of mine.
+    const onCleared = (d: { roomId: string }) => {
+      if (d.roomId !== roomId) return;
+      setMessages([]);
+      setCallLogs([]);
+      setPinnedMessages([]);
+    };
+    const onPrefs = (d: roomsApi.ChatPrefs & { room_id: string }) => {
+      if (d.room_id === roomId) setPrefs(d);
+    };
     // "Delete for me" done on another tab/device of mine.
     const onHideMessage = (d: { id: string; roomId: string }) => {
       if (d.roomId !== roomId) return;
@@ -299,6 +315,8 @@ export default function ChatRoomPage() {
     socket.on("message:new", onNewMessage);
     socket.on("message:edit", onEditMessage);
     socket.on("message:delete", onDeleteMessage);
+    socket.on("chat:cleared", onCleared);
+    socket.on("chat:prefs", onPrefs);
     socket.on("message:revoked", onRevokeMessage);
     socket.on("message:hidden", onHideMessage);
     socket.on("call:log", onCallLog);
@@ -315,6 +333,8 @@ export default function ChatRoomPage() {
       socket.off("message:new", onNewMessage);
       socket.off("message:edit", onEditMessage);
       socket.off("message:delete", onDeleteMessage);
+      socket.off("chat:cleared", onCleared);
+      socket.off("chat:prefs", onPrefs);
       socket.off("message:revoked", onRevokeMessage);
       socket.off("message:hidden", onHideMessage);
       socket.off("call:log", onCallLog);
@@ -444,6 +464,41 @@ export default function ChatRoomPage() {
     const pins = await roomsApi.listPinnedMessages(roomId).catch(() => []);
     const msgs = (pins as Array<{ message?: Message }>).map((p) => p.message).filter((m): m is Message => Boolean(m));
     setPinnedMessages(await attachProfiles(msgs));
+  };
+
+  useEffect(() => {
+    setPrefs(null);
+    if (!roomId) return;
+    let cancelled = false;
+    roomsApi.getChatPrefs().then((all) => { if (!cancelled) setPrefs(all.find((p) => p.room_id === roomId) ?? null); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [roomId]);
+
+  const chatMuted = !!prefs?.muted_until && new Date(prefs.muted_until).getTime() > Date.now(); // my notification mute (not the admin "muted member" flag)
+
+  const setMute = async (choice: roomsApi.MuteChoice) => {
+    if (!roomId) return;
+    try {
+      const updated = await roomsApi.updateChatPrefs(roomId, { muted: choice });
+      setPrefs(updated);
+      toast.success(choice === "off" ? "Notifications on" : "Chat muted");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't update notifications"));
+    }
+  };
+
+  const clearThisChat = async () => {
+    if (!roomId) return;
+    try {
+      const updated = await roomsApi.clearChat(roomId);
+      setPrefs(updated);
+      setMessages([]);
+      setCallLogs([]);
+      setPinnedMessages([]);
+      toast.success("Chat cleared");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "Couldn't clear this chat"));
+    }
   };
 
   const fetchCallLogs = async () => {
@@ -808,7 +863,9 @@ export default function ChatRoomPage() {
   > = [
     ...messages.map((message) => ({ kind: "message" as const, created_at: message.created_at, item: message })),
     ...(room?.type === "dm"
-      ? callLogs.map((callLog) => ({ kind: "call_log" as const, created_at: callLog.created_at, item: callLog }))
+      ? callLogs
+          .filter((callLog) => !prefs?.cleared_at || new Date(callLog.created_at).getTime() > new Date(prefs.cleared_at).getTime())
+          .map((callLog) => ({ kind: "call_log" as const, created_at: callLog.created_at, item: callLog }))
       : []),
   ].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
@@ -822,7 +879,7 @@ export default function ChatRoomPage() {
         <button onClick={() => room?.type !== "dm" && navigate(`/room/${roomId}/members`)} className="flex min-w-0 flex-1 items-center gap-3 text-left py-1">
           {room?.type === "dm" ? <UserAvatar name={dmPeer?.display_name || dmPeer?.username} url={dmPeer?.avatar_url} size="md" /> : <UserAvatar name={room?.name} url={(room as { avatar_url?: string | null } | null)?.avatar_url} size="md" />}
           <div className="min-w-0">
-            <h1 className="text-[16px] leading-tight font-display font-semibold text-primary-foreground truncate">{roomTitle}</h1>
+            <h1 className="text-[16px] leading-tight font-display font-semibold text-primary-foreground truncate flex items-center gap-1.5"><span className="truncate">{roomTitle}</span>{chatMuted && <BellOff className="w-3.5 h-3.5 shrink-0 opacity-80" aria-label="Muted" />}</h1>
             <p className={`text-[12.5px] leading-tight truncate ${typingText ? "text-primary-foreground font-medium" : "text-primary-foreground/75"}`}>{roomSubtitle}</p>
           </div>
         </button>
@@ -846,6 +903,19 @@ export default function ChatRoomPage() {
           <DropdownMenuContent align="end">
             {room?.type !== "dm" && <DropdownMenuItem onClick={() => navigate(`/room/${roomId}/members`)}><Users className="mr-2 h-4 w-4" />Group info &amp; members</DropdownMenuItem>}
             {room?.type === "dm" && dmPeer && <DropdownMenuItem onClick={() => void handleBlockUser(dmPeer.user_id, dmPeer.display_name || dmPeer.username || "User")}><ShieldBan className="mr-2 h-4 w-4" />Block user</DropdownMenuItem>}
+            {chatMuted ? (
+              <DropdownMenuItem onClick={() => void setMute("off")}><Bell className="mr-2 h-4 w-4" />Unmute notifications</DropdownMenuItem>
+            ) : (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger><BellOff className="mr-2 h-4 w-4" />Mute notifications</DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  <DropdownMenuItem onClick={() => void setMute("8h")}>8 hours</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void setMute("1w")}>1 week</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void setMute("forever")}>Always</DropdownMenuItem>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+            <DropdownMenuItem onSelect={() => window.setTimeout(() => setClearOpen(true), 0)}><Eraser className="mr-2 h-4 w-4" />Clear chat</DropdownMenuItem>
             <DropdownMenuItem onClick={() => setReportTarget({ type: "room" })}><Flag className="mr-2 h-4 w-4" />{room?.type === "dm" ? "Report" : "Report room"}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -1018,6 +1088,19 @@ export default function ChatRoomPage() {
         </button>
       )}
       </div>
+
+      <AlertDialog open={clearOpen} onOpenChange={setClearOpen}>
+        <AlertDialogContent className="max-w-sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear this chat?</AlertDialogTitle>
+            <AlertDialogDescription>All messages and calls here will be removed from your view. {room?.type === "dm" ? "The other person keeps their copy." : "Other members aren't affected."}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void clearThisChat()}>Clear chat</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ForwardDialog open={!!forwardMessage} onOpenChange={(o) => !o && setForwardMessage(null)} message={forwardMessage} />
 

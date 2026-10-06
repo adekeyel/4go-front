@@ -30,6 +30,8 @@ interface MentionTextareaProps {
 export interface MentionTextareaHandle {
   focus: () => void;
   reset: () => void;
+  /** Insert text (e.g. an emoji) at the caret / over the selection. */
+  insertText: (text: string, opts?: { focus?: boolean }) => void;
 }
 
 const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextareaProps>(
@@ -59,6 +61,20 @@ const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextareaProps>(
 
     useImperativeHandle(ref, () => ({
       focus: () => taRef.current?.focus(),
+      insertText: (text, opts) => {
+        const ta = taRef.current;
+        const start = ta?.selectionStart ?? value.length;
+        const end = ta?.selectionEnd ?? start;
+        const next = value.slice(0, start) + text + value.slice(end);
+        if (maxLength && next.length > maxLength) return;
+        onChange(next);
+        const pos = start + text.length;
+        requestAnimationFrame(() => {
+          if (!ta) return;
+          if (opts?.focus !== false) ta.focus();
+          ta.setSelectionRange(pos, pos);
+        });
+      },
       reset: () => {
         if (taRef.current) {
           taRef.current.style.height = "auto";
@@ -67,6 +83,14 @@ const MentionTextarea = forwardRef<MentionTextareaHandle, MentionTextareaProps>(
         setMentionStart(null);
       },
     }));
+
+    // Keep the height in step with the value (drafts, emoji, mentions) - not only with typing.
+    useEffect(() => {
+      const ta = taRef.current;
+      if (!ta || !autoResize) return;
+      ta.style.height = "auto";
+      if (value) ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+    }, [value, autoResize]);
 
     // Debounced search
     useEffect(() => {
