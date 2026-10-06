@@ -3,7 +3,14 @@ import type { Tables } from "@/types/database";
 
 // Some columns (edited_at, reply_to) may be newer than the generated
 // Supabase types snapshot — declared explicitly here, same as ChatRoomPage.
-export type Message = Tables<"messages"> & { edited_at?: string | null; reply_to?: string | null };
+export type Message = Tables<"messages"> & {
+  edited_at?: string | null;
+  reply_to?: string | null;
+  /** Set when the message was deleted for everyone; content/media are gone, show "This message was deleted". */
+  deleted_at?: string | null;
+  /** True when this is a copy of a message from another chat. */
+  forwarded?: boolean | null;
+};
 
 export async function listMessages(roomId: string, before?: string): Promise<Message[]> {
   const { data } = await apiClient.get(`/messages/room/${roomId}`, { params: before ? { before } : undefined });
@@ -30,7 +37,7 @@ export async function getMessagesByIds(roomId: string, ids: string[]): Promise<M
 
 export async function sendMessage(
   roomId: string,
-  input: { type?: Message["type"]; content?: string; media_url?: string; duration?: number; reply_to?: string; client_id?: string }
+  input: { type?: Message["type"]; content?: string; media_url?: string; duration?: number; reply_to?: string; forwarded?: boolean; client_id?: string }
 ): Promise<Message & { client_id?: string }> {
   const { data } = await apiClient.post(`/messages/room/${roomId}`, input);
   return data;
@@ -41,8 +48,12 @@ export async function editMessage(messageId: string, content: string): Promise<M
   return data;
 }
 
-export async function deleteMessage(messageId: string) {
-  await apiClient.delete(`/messages/${messageId}`);
+/**
+ * "me" hides the message from this person's view only; "everyone" replaces it with a
+ * "This message was deleted" placeholder for the whole chat (sender within the time limit, or a room admin).
+ */
+export async function deleteMessage(messageId: string, scope: "me" | "everyone" = "everyone") {
+  await apiClient.delete(`/messages/${messageId}`, { params: { scope } });
 }
 
 export async function reactToMessage(messageId: string, emoji: string) {

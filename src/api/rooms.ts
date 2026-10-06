@@ -127,7 +127,7 @@ export async function getRoomReceipts(roomId: string): Promise<RoomReceipt[]> {
 export interface DmSummary {
   room_id: string;
   peer_id: string;
-  last_message: { id: string; sender_id: string; type: string; content: string | null; created_at: string } | null;
+  last_message: { id: string; sender_id: string; type: string; content: string | null; created_at: string; deleted_at?: string | null } | null;
   last_call: { id: string; caller_id: string; callee_id: string; call_type: string; status: string; duration_seconds: number; created_at: string } | null;
   unread: number;
   peer_last_read_at: string | null;
