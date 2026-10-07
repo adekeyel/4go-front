@@ -11,6 +11,7 @@ import FeedSection from "@/components/feed/FeedSection";
 import { MessageCircle, Menu, Info, FileText, LifeBuoy, ChevronRight, Trophy, CalendarCheck, UserPlus, Users, Share2, Camera, Crown, Compass, Flame, Wallet } from "lucide-react";
 import NotificationBell from "@/components/NotificationBell";
 import { useUnreadCalls } from "@/hooks/useUnreadCalls";
+import { sortChats } from "@/lib/roomOrder";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -32,6 +33,8 @@ interface RoomWithCount {
   type: string;
   avatar_url: string | null;
   member_count: number;
+  pinned_at?: string | null;
+  muted_until?: string | null;
 }
 
 export default function HomePage() {
@@ -42,20 +45,22 @@ export default function HomePage() {
   const dmUnread = Math.max(totalUnread, totalUnreadPersistent) + totalUnreadCalls;
   const [rooms, setRooms] = useState<RoomWithCount[]>([]);
   const [myRooms, setMyRooms] = useState<RoomWithCount[]>([]);
+  const [hasJoinedRooms, setHasJoinedRooms] = useState(false); // includes archived ones
   const [loading, setLoading] = useState(true);
   const [pendingRoomId, setPendingRoomId] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const fetchRooms = useCallback(async () => {
-    const [enriched, myMemberships] = await Promise.all([
+    const [enriched, mine] = await Promise.all([
       roomsApi.browseRooms({ types: ["public"] }).catch(() => []),
-      user ? roomsApi.listMyRooms().catch(() => []) : Promise.resolve([]),
+      user ? roomsApi.listMyRoomsDetailed().catch(() => []) : Promise.resolve([]),
     ]);
 
     setRooms(enriched);
 
-    const userRoomIds = new Set(myMemberships.map((r) => r.id));
-    setMyRooms(enriched.filter((r) => userRoomIds.has(r.id)));
+    // "Your Active Rooms": every room I'm in (private ones too), pinned first then most recently active, archived hidden.
+    setHasJoinedRooms(mine.length > 0);
+    setMyRooms(sortChats(mine.filter((r) => !r.archived)));
 
     setLoading(false);
   }, [user]);
@@ -64,7 +69,7 @@ export default function HomePage() {
     fetchRooms();
   }, [user, fetchRooms]);
 
-  const isNewUser = myRooms.length === 0;
+  const isNewUser = !hasJoinedRooms;
   const displayedRooms = isNewUser ? rooms.slice(0, 4) : myRooms.slice(0, 4);
 
   const handleShare = async () => {
@@ -270,7 +275,7 @@ export default function HomePage() {
               {isNewUser ? "🔥 Trending Rooms" : "Your Active Rooms"}
             </h2>
             <button
-              onClick={() => navigate("/discover")}
+              onClick={() => navigate(isNewUser ? "/discover" : "/rooms")}
               className="text-sm text-primary font-semibold hover:underline"
             >
               See all →
@@ -286,13 +291,13 @@ export default function HomePage() {
           ) : displayedRooms.length === 0 ? (
             <div className="text-center py-12">
               <p className="text-muted-foreground mb-3">
-                {isNewUser ? "No rooms yet. Be the first!" : "You haven't joined any rooms yet."}
+                {isNewUser ? "No rooms yet. Be the first!" : "All your rooms are archived."}
               </p>
               <button
-                onClick={() => navigate(isNewUser ? "/create-room" : "/discover")}
+                onClick={() => navigate(isNewUser ? "/create-room" : "/rooms")}
                 className="text-primary font-semibold hover:underline"
               >
-                {isNewUser ? "Create a Room" : "Discover Rooms"}
+                {isNewUser ? "Create a Room" : "Open your rooms"}
               </button>
             </div>
           ) : (
@@ -303,6 +308,8 @@ export default function HomePage() {
                   room={room}
                   onClick={() => openRoom(room.id)}
                   unreadCount={unreadCounts[room.id] || 0}
+                  pinned={!!room.pinned_at}
+                  muted={!!room.muted_until && new Date(room.muted_until).getTime() > Date.now()}
                 />
               ))}
             </div>

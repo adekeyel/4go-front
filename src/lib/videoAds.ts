@@ -16,6 +16,8 @@ export interface VideoAd {
   mid_roll_at_seconds: number | null;
   min_video_seconds: number;
   target_page_ids: string[];
+  /** Also plays inside videos shared in chat rooms (only possible when no specific pages are targeted). */
+  show_in_rooms: boolean;
   skippable: boolean;
   skip_after_seconds: number;
   starts_at: string | null;
@@ -61,13 +63,14 @@ export function formatClock(seconds: number | null | undefined): string {
 }
 
 /** One-line, plain-English description of when/where an ad plays. */
-export function describeRule(ad: Pick<VideoAd, "placement" | "mid_roll_at_seconds" | "min_video_seconds" | "target_page_ids">): string {
+export function describeRule(ad: Pick<VideoAd, "placement" | "mid_roll_at_seconds" | "min_video_seconds" | "target_page_ids"> & { show_in_rooms?: boolean }): string {
   const where =
     ad.placement === "pre_roll" ? "Before the video"
     : ad.placement === "post_roll" ? "After the video"
     : `At ${formatClock(ad.mid_roll_at_seconds)} into the video`;
   const which = `videos longer than ${ad.min_video_seconds}s`;
-  const pages = ad.target_page_ids.length === 0 ? "all pages" : `${ad.target_page_ids.length} page${ad.target_page_ids.length === 1 ? "" : "s"}`;
+  const pageText = ad.target_page_ids.length === 0 ? "all pages" : `${ad.target_page_ids.length} page${ad.target_page_ids.length === 1 ? "" : "s"}`;
+  const pages = ad.show_in_rooms ? `${pageText} + room videos` : pageText;
   return `${where} · ${which} · ${pages}`;
 }
 
@@ -88,7 +91,7 @@ export function localInputToIso(value: string): string | null {
 }
 
 /** Same cross-field rules the server enforces, so the admin gets the message before the request. */
-export function validateAd(ad: Pick<VideoAdInput, "title" | "video_url" | "placement" | "mid_roll_at_seconds" | "starts_at" | "ends_at" | "min_video_seconds">): string | null {
+export function validateAd(ad: Pick<VideoAdInput, "title" | "video_url" | "placement" | "mid_roll_at_seconds" | "starts_at" | "ends_at" | "min_video_seconds" | "show_in_rooms" | "target_page_ids">): string | null {
   if (!ad.title.trim()) return "Give the ad a title";
   if (!ad.video_url) return "Upload the ad video";
   if (ad.placement === "mid_roll" && !(ad.mid_roll_at_seconds && ad.mid_roll_at_seconds > 0)) {
@@ -97,6 +100,9 @@ export function validateAd(ad: Pick<VideoAdInput, "title" | "video_url" | "place
   if (!Number.isFinite(ad.min_video_seconds) || ad.min_video_seconds < 0) return "Minimum video length can't be negative";
   if (ad.starts_at && ad.ends_at && new Date(ad.ends_at) <= new Date(ad.starts_at)) {
     return "The end date must be after the start date";
+  }
+  if (ad.show_in_rooms && ad.target_page_ids.length > 0) {
+    return "Room videos aren't part of any page, so an ad aimed at specific pages can't also run in rooms";
   }
   return null;
 }

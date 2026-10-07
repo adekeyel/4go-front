@@ -122,7 +122,7 @@ export default function ForwardDialog({ open, onOpenChange, message }: ForwardDi
   const preview = !message ? "" : message.type === "image" ? "📷 Photo" : message.type === "video" ? "🎬 Video" : message.type === "audio" ? "🎤 Voice note" : message.content || "";
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !sending && onOpenChange(o)}>
+    <Dialog open={open} onOpenChange={(o: boolean) => !sending && onOpenChange(o)}>
       <DialogContent className="max-w-md p-0 gap-0 overflow-hidden">
         <DialogHeader className="px-4 pt-4 pb-2">
           <DialogTitle>Forward to…</DialogTitle>

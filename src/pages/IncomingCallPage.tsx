@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useCallContext } from "@/contexts/CallContext";
 import { useAuth } from "@/contexts/AuthContext";
-import { Phone, X, Video } from "lucide-react";
+import { Phone, PhoneOff, Video } from "lucide-react";
 
 /**
  * Dedicated in-app ringing screen opened by a notification tap.
@@ -58,15 +58,19 @@ export default function IncomingCallPage() {
   const matches = !callId || !incoming || incoming.callId === callId;
 
   return (
-    <div className="fixed inset-0 z-[150] bg-background flex flex-col items-center justify-center px-6 text-center gap-6">
-      <div className="w-24 h-24 rounded-full gradient-primary flex items-center justify-center text-primary-foreground text-3xl font-bold animate-pulse">
-        {(incoming?.name || "?").charAt(0).toUpperCase()}
-      </div>
+    <div className="fixed inset-0 z-[150] bg-gradient-to-b from-[#0f5c54] via-[#0b2b2a] to-[#0b141a] text-white flex flex-col items-center justify-center px-6 text-center gap-6">
+      {incoming?.avatarUrl ? (
+        <img src={incoming.avatarUrl} alt={incoming.name} className="w-32 h-32 rounded-full object-cover border-2 border-white/20 animate-pulse" />
+      ) : (
+        <div className="w-32 h-32 rounded-full gradient-primary flex items-center justify-center text-primary-foreground text-4xl font-bold animate-pulse">
+          {(incoming?.name || "?").charAt(0).toUpperCase()}
+        </div>
+      )}
       <div>
-        <h1 className="text-2xl font-display font-bold text-foreground">
+        <h1 className="text-2xl font-display font-bold text-white">
           {incoming?.name || "Incoming call"}
         </h1>
-        <p className="text-sm text-muted-foreground mt-1">
+        <p className="text-sm text-white/70 mt-1">
           {incoming
             ? `Incoming ${incoming.type} call…`
             : "Connecting to the call…"}
@@ -80,24 +84,24 @@ export default function IncomingCallPage() {
               call.rejectCall();
               navigate("/", { replace: true });
             }}
-            className="w-16 h-16 rounded-full bg-destructive flex items-center justify-center text-destructive-foreground"
+            className="w-16 h-16 rounded-full bg-red-500 flex items-center justify-center text-white"
             aria-label="Decline"
           >
-            <X className="w-7 h-7" />
+            <PhoneOff className="w-7 h-7" />
           </button>
           <button
             onClick={() => {
               void call.answerCall();
               navigate("/", { replace: true });
             }}
-            className="w-16 h-16 rounded-full bg-primary flex items-center justify-center text-primary-foreground animate-pulse"
+            className="w-16 h-16 rounded-full bg-green-500 flex items-center justify-center text-white animate-pulse"
             aria-label="Answer"
           >
             {incoming.type === "video" ? <Video className="w-7 h-7" /> : <Phone className="w-7 h-7" />}
           </button>
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground max-w-xs">
+        <p className="text-xs text-white/70 max-w-xs">
           Waiting for the call signal… Make sure you have a stable connection.
           You can return to the app and we'll ring you here as soon as the
           caller is ready.
@@ -106,7 +110,7 @@ export default function IncomingCallPage() {
 
       <button
         onClick={() => navigate("/", { replace: true })}
-        className="mt-4 text-sm text-muted-foreground underline"
+        className="mt-4 text-sm text-white/70 underline"
       >
         Back to app
       </button>

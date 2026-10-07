@@ -112,6 +112,7 @@ self.addEventListener("push", (event) => {
   try { if (event.data) data = event.data.json(); } catch {}
   const isCall = data.data && data.data.kind === "incoming_call";
   const isCallCancelled = data.data && data.data.kind === "call_cancelled";
+  const isMissedCall = !!(data.data && data.data.kind === "missed_call");
   const tag = (data.data && data.data.tag) || "4go-push";
   if (isCallCancelled) {
     CLOSED_CALL_TAGS.add(tag);
@@ -130,11 +131,14 @@ self.addEventListener("push", (event) => {
     tag,
     vibrate: isCall ? [400, 200, 400, 200, 400, 200, 400] : [200, 100, 200],
     requireInteraction: isCall === true,
-    renotify: isCall === true,
+    // A newer missed-call notification from the same person replaces the old one ("3 missed calls") and still alerts.
+    renotify: isCall === true || isMissedCall,
     data: data.data || {},
     actions: isCall ? [
       { action: "accept", title: "Accept" },
       { action: "decline", title: "Decline" },
+    ] : isMissedCall ? [
+      { action: "callback", title: "Call back" },
     ] : undefined,
   };
   event.waitUntil(self.registration.showNotification(data.title, options));
@@ -152,6 +156,10 @@ self.addEventListener("notificationclick", (event) => {
     } else {
       navigateTo = base + "?accept_call=1";
     }
+  }
+  if (data.kind === "missed_call" && event.action === "callback" && data.roomId) {
+    // Opens the chat and starts the same kind of call straight away (the chat page reads ?callback=).
+    navigateTo = "/room/" + data.roomId + "?callback=" + (data.callType === "video" ? "video" : "voice");
   }
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {

@@ -10,9 +10,14 @@ const FIRST_PLAY_WAIT_MS = 2500;
 const AD_START_TIMEOUT_MS = 8000;
 
 interface Props {
+  /** The id of the thing being watched: a page post, or (with source="message") a chat message. */
   postId: string;
   src: string;
   className?: string;
+  /** Page-post videos (default) or a video shared in a chat room. */
+  source?: "post" | "message";
+  /** Start playing as soon as it's shown (used when a viewer opens a room video). */
+  autoPlay?: boolean;
 }
 
 /** After an ad: "play" resumes the video, "stay" leaves it where it is (used for the post-roll at the very end). */
@@ -35,7 +40,7 @@ function leaveFullscreen(video: HTMLVideoElement | null) {
  * mid-rolls when playback reaches their time, post-roll when the video ends. Each ad plays at most once
  * per player. If someone skips past several mid-rolls in one jump, only the latest one is shown.
  */
-export default function AdVideoPlayer({ postId, src, className }: Props) {
+export default function AdVideoPlayer({ postId, src, className, source = "post", autoPlay = false }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLVideoElement>(null);
   const adRef = useRef<HTMLVideoElement>(null);
@@ -76,12 +81,12 @@ export default function AdVideoPlayer({ postId, src, className }: Props) {
 
   const loadAds = useCallback((duration: number) => {
     if (!loadRef.current) {
-      loadRef.current = fetchServedAds(postId, duration)
+      loadRef.current = fetchServedAds(postId, duration, source)
         .catch(() => [] as ServedAd[])
         .then((ads) => { adsRef.current = ads; return ads; });
     }
     return loadRef.current;
-  }, [postId]);
+  }, [postId, source]);
 
   // Ask for ads ahead of time, but only for videos that are on screen, so a long feed doesn't fire a request per card.
   const prefetch = useCallback(() => {
@@ -240,6 +245,8 @@ export default function AdVideoPlayer({ postId, src, className }: Props) {
         src={src}
         controls
         controlsList="nodownload"
+        autoPlay={autoPlay}
+        playsInline
         preload="metadata"
         className={cn("block", className)}
         onLoadedMetadata={onLoadedMetadata}

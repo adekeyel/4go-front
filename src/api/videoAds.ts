@@ -45,13 +45,14 @@ export async function uploadAdVideo(file: File, onProgress?: (percent: number) =
 }
 
 /**
- * Ads to play inside one page-post video, in playback order. `duration` is the video's real length in
+ * Ads to play inside one page-post or chat-room video, in playback order. `duration` is the video's real length in
  * seconds (from the browser once its metadata has loaded). Rejects on failure; the player treats that as
  * "no ads" so a broken ad service never blocks a video.
  */
-export async function fetchServedAds(postId: string, duration: number): Promise<ServedAd[]> {
+export async function fetchServedAds(id: string, duration: number, source: "post" | "message" = "post"): Promise<ServedAd[]> {
   const { data } = await apiClient.get<{ ads: ServedAd[] }>("/video-ads/serve", {
-    params: { post_id: postId, duration: Math.round(duration * 100) / 100 },
+    // "post" = a page-post video; "message" = a video shared in a chat room.
+    params: { [source === "message" ? "message_id" : "post_id"]: id, duration: Math.round(duration * 100) / 100 },
     timeout: 8000,
   });
   return data.ads ?? [];

@@ -69,6 +69,8 @@ interface ChatMessageProps {
   showSenderName?: boolean;
   /** Group rooms show the sender's avatar beside the first bubble of a run; 1:1 chats don't. Default true. */
   showAvatar?: boolean;
+  /** Videos opened from this message can show ads: true in rooms, false in private 1:1 chats. Default false. */
+  showVideoAds?: boolean;
 }
 
 // A stable colour per sender so people are easy to tell apart in a group.
@@ -82,7 +84,7 @@ function senderColor(id: string) {
 const LONG_PRESS_MS = 450;
 const SWIPE_REPLY_PX = 56;
 
-export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, onDelete, onForward, onReport, onBlockUser, onPin, onReply, isPinned, replyInfo, onScrollToMessage, status, showHeader = true, grouped = false, localState, onRetry, onDiscard, showSenderName = true, showAvatar = true }: ChatMessageProps) {
+export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, onDelete, onForward, onReport, onBlockUser, onPin, onReply, isPinned, replyInfo, onScrollToMessage, status, showHeader = true, grouped = false, localState, onRetry, onDiscard, showSenderName = true, showAvatar = true, showVideoAds = false }: ChatMessageProps) {
   const { user } = useAuth();
   const time = new Date(message.created_at).toLocaleTimeString([], {
     hour: "2-digit",
@@ -486,6 +488,8 @@ export default function ChatMessage({ message, isOwn, isAdmin, roomId, onEdit, o
           onOpenChange={(open) => !open && setMediaViewer(null)}
           type={mediaViewer.type}
           url={mediaViewer.url}
+          messageId={message.id}
+          adsEnabled={showVideoAds}
         />
       )}
     </div>

@@ -54,6 +54,10 @@ interface UserSummary {
 }
 
 interface MessageWithProfile extends Message {
+  /** Set when the message was deleted for everyone (shown as "This message was deleted"). */
+  deleted_at?: string | null;
+  /** True when this is a copy of a message forwarded from another chat. */
+  forwarded?: boolean | null;
   profile?: UserSummary;
   /** Present only on a message that was typed on this device and hasn't been confirmed by the server yet. */
   local?: { state: "sending" | "failed"; clientId: string };
@@ -869,6 +873,17 @@ export default function ChatRoomPage() {
       : []),
   ].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
+  // Opened from a missed-call notification's "Call back" button: start that kind of call once, then drop the parameter.
+  useEffect(() => {
+    const wanted = searchParams.get("callback");
+    if (!wanted || room?.type !== "dm" || !dmPeer || !roomId) return;
+    const type = wanted === "video" ? "video" : "voice";
+    setSearchParams((prev) => { const next = new URLSearchParams(prev); next.delete("callback"); return next; }, { replace: true });
+    if ((type === "video" && !canVideoCall) || (type === "voice" && !canVoiceCall)) { toast.error(`Your rank doesn't allow ${type} calls yet.`); return; }
+    void call.startCall(roomId, dmPeer.user_id, dmPeer.display_name || dmPeer.username || "User", type, dmPeer.avatar_url);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, room?.type, dmPeer?.user_id, roomId]);
+
   return (
     <div className="h-screen flex flex-col bg-background">
       {/* Header */}
@@ -886,8 +901,8 @@ export default function ChatRoomPage() {
 
         {room?.type === "dm" && dmPeer && (
           <div className="flex">
-            {canVideoCall && <button onClick={() => call.startCall(roomId || "", dmPeer.user_id, dmPeer.display_name || dmPeer.username || "User", "video")} className="p-2.5 text-primary-foreground/90 hover:text-primary-foreground rounded-full active:bg-white/10" title="Video call" aria-label="Video call"><Video className="w-5 h-5" /></button>}
-            {canVoiceCall && <button onClick={() => call.startCall(roomId || "", dmPeer.user_id, dmPeer.display_name || dmPeer.username || "User", "voice")} className="p-2.5 text-primary-foreground/90 hover:text-primary-foreground rounded-full active:bg-white/10" title="Voice call" aria-label="Voice call"><Phone className="w-5 h-5" /></button>}
+            {canVideoCall && <button onClick={() => call.startCall(roomId || "", dmPeer.user_id, dmPeer.display_name || dmPeer.username || "User", "video", dmPeer.avatar_url)} className="p-2.5 text-primary-foreground/90 hover:text-primary-foreground rounded-full active:bg-white/10" title="Video call" aria-label="Video call"><Video className="w-5 h-5" /></button>}
+            {canVoiceCall && <button onClick={() => call.startCall(roomId || "", dmPeer.user_id, dmPeer.display_name || dmPeer.username || "User", "voice", dmPeer.avatar_url)} className="p-2.5 text-primary-foreground/90 hover:text-primary-foreground rounded-full active:bg-white/10" title="Voice call" aria-label="Voice call"><Phone className="w-5 h-5" /></button>}
           </div>
         )}
 
@@ -1059,6 +1074,7 @@ export default function ChatRoomPage() {
                       grouped={grouped}
                       showSenderName={room?.type !== "dm"}
                       showAvatar={room?.type !== "dm"}
+                      showVideoAds={room?.type !== "dm"}
                       localState={entry.item.local?.state}
                       onRetry={() => retryLocal(entry.item.id)}
                       onDiscard={() => discardLocal(entry.item.id)}

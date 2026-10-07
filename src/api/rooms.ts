@@ -145,6 +145,17 @@ export interface ChatPrefs {
 
 export type MuteChoice = "off" | "8h" | "1w" | "forever";
 
+/** A room I'm in (not a DM): member count, the last message as I'd see it, and my pin / mute / archive settings. */
+export interface MyRoomSummary extends Room, ChatPrefs {
+  member_count: number;
+  last_message: { sender_id: string; sender_name: string; type: string; content: string | null; created_at: string; deleted_at: string | null } | null;
+}
+
+export async function listMyRoomsDetailed(): Promise<MyRoomSummary[]> {
+  const { data } = await apiClient.get("/rooms/mine/details");
+  return data;
+}
+
 export async function getChatPrefs(): Promise<(ChatPrefs & { room_id: string })[]> {
   const { data } = await apiClient.get("/rooms/prefs");
   return data;

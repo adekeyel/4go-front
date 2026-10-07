@@ -1,6 +1,6 @@
 import { useCallContext } from "@/contexts/CallContext";
 import CallOverlay from "@/components/CallOverlay";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { listFriends } from "@/api/friends";
 import { useAuth } from "@/contexts/AuthContext";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -17,14 +17,9 @@ interface FriendRow {
 export default function GlobalCallOverlay() {
   const call = useCallContext();
   const { user } = useAuth();
-  const [peerName, setPeerName] = useState("User");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [friends, setFriends] = useState<FriendRow[]>([]);
   const [loadingFriends, setLoadingFriends] = useState(false);
-
-  useEffect(() => {
-    if (call.incomingCall) setPeerName(call.incomingCall.name);
-  }, [call.incomingCall]);
 
   const loadFriends = async () => {
     if (!user) return;
@@ -49,13 +44,17 @@ export default function GlobalCallOverlay() {
       <CallOverlay
         callState={call.callState}
         callType={call.callType}
-        peerName={peerName}
+        phase={call.callPhase}
+        connectedAt={call.connectedAt}
+        peer={call.peer}
         participants={call.participants}
         incomingCall={call.incomingCall}
         isMuted={call.isMuted}
         isCameraOff={call.isCameraOff}
         isSpeakerOn={call.isSpeakerOn}
         isScreenSharing={call.isScreenSharing}
+        isFrontCamera={call.isFrontCamera}
+        canSwitchCamera={call.canSwitchCamera}
         localVideoRef={call.localVideoRef}
         remoteVideoRef={call.remoteVideoRef}
         remoteAudioRef={call.remoteAudioRef}
@@ -66,6 +65,7 @@ export default function GlobalCallOverlay() {
         onToggleCamera={call.toggleCamera}
         onToggleSpeaker={call.toggleSpeaker}
         onToggleScreenShare={call.toggleScreenShare}
+        onSwitchCamera={call.switchCamera}
         onAddParticipant={openPicker}
         canAddParticipant={canAdd}
       />

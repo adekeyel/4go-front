@@ -12,6 +12,7 @@ import UserAvatar from "@/components/UserAvatar";
 import { UserPlus, MoreVertical, MessageCircle, Search, Plus, Check, CheckCheck, PhoneMissed, BellOff, Pin, Archive, ChevronDown, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import ChatActionsSheet from "@/components/ChatActionsSheet";
+import CallsList from "@/components/CallsList";
 import { useCallContext } from "@/contexts/CallContext";
 import { canMakeVoiceCall, canMakeVideoCall } from "@/lib/callPermissions";
 import { apiErrorMessage } from "@/lib/apiClient";
@@ -95,11 +96,11 @@ export default function DMsPage() {
   } = useNotificationContext();
   const navigate = useNavigate();
   const socket = useSocket();
-  const { unreadCallsByRoom } = useUnreadCalls();
+  const { unreadCallsByRoom, totalUnreadCalls, markCallsSeen } = useUnreadCalls();
   const [friends, setFriends] = useState<Friend[]>([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"messages" | "requests">("messages");
+  const [tab, setTab] = useState<"messages" | "calls" | "requests">("messages");
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [actionsFor, setActionsFor] = useState<Friend | null>(null);
@@ -365,7 +366,7 @@ export default function DMsPage() {
         </div>
 
         {/* Search */}
-        <div className="relative mb-4">
+        <div className={`relative mb-4 ${tab === "calls" ? "hidden" : ""}`}>
           <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
@@ -377,7 +378,7 @@ export default function DMsPage() {
         </div>
 
         {/* Top friends row */}
-        {friends.length > 0 && !showArchived && !search.trim() && (
+        {friends.length > 0 && tab === "messages" && !showArchived && !search.trim() && (
           <div className="-mx-4 px-4 overflow-x-auto scrollbar-none mb-4">
             <div className="flex items-start gap-4 pb-1">
               {/* Add tile */}
@@ -427,6 +428,22 @@ export default function DMsPage() {
             )}
           </button>
           <button
+            onClick={() => setTab("calls")}
+            className={`pb-2.5 text-sm font-semibold transition-colors relative flex items-center gap-1.5 ${
+              tab === "calls" ? "text-foreground" : "text-muted-foreground"
+            }`}
+          >
+            Calls
+            {totalUnreadCalls > 0 && tab !== "calls" && (
+              <span className="min-w-[18px] h-[18px] rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold flex items-center justify-center px-1">
+                {totalUnreadCalls > 99 ? "99+" : totalUnreadCalls}
+              </span>
+            )}
+            {tab === "calls" && (
+              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
+            )}
+          </button>
+          <button
             onClick={() => navigate("/friend-requests")}
             className={`pb-2.5 text-sm font-semibold transition-colors relative flex items-center gap-1.5 ${
               tab === "requests" ? "text-foreground" : "text-muted-foreground"
@@ -442,7 +459,7 @@ export default function DMsPage() {
         </div>
 
         {/* "Archived" row, like WhatsApp: tucked-away chats live behind it */}
-        {!loading && !showArchived && !search.trim() && archivedFriends.length > 0 && (
+        {!loading && tab === "messages" && !showArchived && !search.trim() && archivedFriends.length > 0 && (
           <button onClick={() => setShowArchived(true)} className="w-full flex items-center gap-3 p-2.5 rounded-xl hover:bg-muted/50 text-left transition-colors mb-1">
             <span className="w-12 h-12 flex items-center justify-center"><Archive className="w-5 h-5 text-primary" /></span>
             <span className="flex-1 text-sm font-semibold text-foreground">Archived</span>
@@ -450,8 +467,10 @@ export default function DMsPage() {
           </button>
         )}
 
-        {/* Friends list */}
-        {loading ? (
+        {/* Friends list (or the call history when the Calls tab is open) */}
+        {tab === "calls" ? (
+          <CallsList onSeen={() => void markCallsSeen()} />
+        ) : loading ? (
           <p className="text-center text-muted-foreground text-sm py-8">Loading...</p>
         ) : filteredFriends.length === 0 ? (
           friends.length === 0 ? (
@@ -576,8 +595,8 @@ export default function DMsPage() {
           onMute={(choice) => void patchPrefs(actionsFor, { muted: choice }, choice === "off" ? "Notifications on" : "Chat muted")}
           onArchive={() => void patchPrefs(actionsFor, { archived: !actionsFor.archived }, actionsFor.archived ? "Chat unarchived" : "Chat archived")}
           onClear={() => void clearChatFor(actionsFor)}
-          onVoiceCall={actionsFor.roomId && canMakeVoiceCall(profile?.rank) ? () => void callCtx.startCall(actionsFor.roomId!, actionsFor.friendId, actionsFor.profile.display_name || actionsFor.profile.username || "User", "voice") : undefined}
-          onVideoCall={actionsFor.roomId && canMakeVideoCall(profile?.rank) ? () => void callCtx.startCall(actionsFor.roomId!, actionsFor.friendId, actionsFor.profile.display_name || actionsFor.profile.username || "User", "video") : undefined}
+          onVoiceCall={actionsFor.roomId && canMakeVoiceCall(profile?.rank) ? () => void callCtx.startCall(actionsFor.roomId!, actionsFor.friendId, actionsFor.profile.display_name || actionsFor.profile.username || "User", "voice", actionsFor.profile.avatar_url) : undefined}
+          onVideoCall={actionsFor.roomId && canMakeVideoCall(profile?.rank) ? () => void callCtx.startCall(actionsFor.roomId!, actionsFor.friendId, actionsFor.profile.display_name || actionsFor.profile.username || "User", "video", actionsFor.profile.avatar_url) : undefined}
         />
       )}
       <AdSlot placement="dm" />

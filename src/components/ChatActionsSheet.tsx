@@ -16,13 +16,15 @@ interface ChatActionsSheetProps {
   onMute: (choice: MuteChoice) => void;
   onArchive: () => void;
   onClear: () => void;
+  /** A room (not a 1:1 chat): changes the wording of "Clear chat". */
+  isGroup?: boolean;
   /** Only passed for people you're allowed to call. */
   onVoiceCall?: () => void;
   onVideoCall?: () => void;
 }
 
 /** The little menu behind long-press / right-click / the hover chevron on a chat in the list. */
-export default function ChatActionsSheet({ open, onOpenChange, name, avatarUrl, pinned, muted, archived, onPin, onMute, onArchive, onClear, onVoiceCall, onVideoCall }: ChatActionsSheetProps) {
+export default function ChatActionsSheet({ open, onOpenChange, name, avatarUrl, pinned, muted, archived, onPin, onMute, onArchive, onClear, isGroup, onVoiceCall, onVideoCall }: ChatActionsSheetProps) {
   const [stage, setStage] = useState<"main" | "mute" | "clear">("main");
   useEffect(() => { if (open) setStage("main"); }, [open]);
 
@@ -73,7 +75,9 @@ export default function ChatActionsSheet({ open, onOpenChange, name, avatarUrl, 
 
         {stage === "clear" && (
           <div className="py-1">
-            <p className="px-5 pt-2 pb-2 text-sm text-foreground">Clear all messages and calls in this chat? This only clears it for you. {name} keeps their copy.</p>
+            <p className="px-5 pt-2 pb-2 text-sm text-foreground">
+              {isGroup ? "Clear all messages in this room? This only clears it for you. Other members aren't affected." : `Clear all messages and calls in this chat? This only clears it for you. ${name} keeps their copy.`}
+            </p>
             <button className={`${row} !text-destructive font-semibold`} onClick={() => run(onClear)}>Clear chat</button>
             <button className={row} onClick={() => setStage("main")}>Cancel</button>
           </div>

@@ -35,6 +35,7 @@ interface FormState {
   min_video: string;
   all_pages: boolean;
   page_ids: string[];
+  in_rooms: boolean;
   skippable: boolean;
   skip_after: string;
   starts_at: string;
@@ -44,7 +45,7 @@ interface FormState {
 const blank: FormState = {
   title: "", advertiser_id: NO_ADVERTISER, video_url: "", thumbnail_url: null, duration_seconds: null,
   target_url: "", status: "active", placement: "pre_roll", mid_roll_at: "", min_video: "30",
-  all_pages: true, page_ids: [], skippable: true, skip_after: "5", starts_at: "", ends_at: "",
+  all_pages: true, page_ids: [], in_rooms: true, skippable: true, skip_after: "5", starts_at: "", ends_at: "",
 };
 
 const fromAd = (ad: VideoAd): FormState => ({
@@ -60,6 +61,7 @@ const fromAd = (ad: VideoAd): FormState => ({
   min_video: String(ad.min_video_seconds),
   all_pages: ad.target_page_ids.length === 0,
   page_ids: ad.target_page_ids,
+  in_rooms: ad.show_in_rooms,
   skippable: ad.skippable,
   skip_after: String(ad.skip_after_seconds),
   starts_at: isoToLocalInput(ad.starts_at),
@@ -126,6 +128,7 @@ export default function VideoAdDialog({ open, onOpenChange, ad, advertisers, onS
       mid_roll_at_seconds: midRoll,
       min_video_seconds: minVideo,
       target_page_ids: f.all_pages ? [] : f.page_ids,
+      show_in_rooms: f.all_pages && f.in_rooms, // room videos aren't part of a page, so only "All pages" ads can run there
       skippable: f.skippable,
       skip_after_seconds: Number.isFinite(skipAfter) ? Math.min(Math.max(skipAfter, 0), 60) : 5,
       starts_at: localInputToIso(f.starts_at),
@@ -267,6 +270,19 @@ export default function VideoAdDialog({ open, onOpenChange, ad, advertisers, onS
                 ))}
               </div>
               {!f.all_pages && <PagePicker value={f.page_ids} onChange={(ids) => set("page_ids", ids)} />}
+            </div>
+            <div className="border-t border-border pt-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">Also show in chat room videos</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {f.all_pages
+                      ? "Plays when a member opens a video shared in a room (not in private 1:1 chats). Premium members never see ads."
+                      : "Not available with specific pages: room videos aren't part of any page."}
+                  </p>
+                </div>
+                <Switch checked={f.all_pages && f.in_rooms} disabled={!f.all_pages} onCheckedChange={(v: boolean) => set("in_rooms", v)} />
+              </div>
             </div>
           </div>
 

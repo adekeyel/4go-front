@@ -1,4 +1,4 @@
-import { Users, Lock, Coins } from "lucide-react";
+import { Users, Lock, Coins, BellOff, Pin } from "lucide-react";
 
 interface RoomCardProps {
   room: {
@@ -11,9 +11,11 @@ interface RoomCardProps {
   };
   onClick: () => void;
   unreadCount?: number;
+  pinned?: boolean;
+  muted?: boolean;
 }
 
-export default function RoomCard({ room, onClick, unreadCount = 0 }: RoomCardProps) {
+export default function RoomCard({ room, onClick, unreadCount = 0, pinned = false, muted = false }: RoomCardProps) {
   const colors = [
     "from-primary/20 to-primary/5",
     "from-accent/20 to-accent/5",
@@ -40,7 +42,7 @@ export default function RoomCard({ room, onClick, unreadCount = 0 }: RoomCardPro
           </span>
         )}
         {unreadCount > 0 && (
-          <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full bg-primary text-primary-foreground text-[10px] font-bold flex items-center justify-center px-1">
+          <span className={`absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full text-[10px] font-bold flex items-center justify-center px-1 ${muted ? "bg-muted-foreground/60 text-background" : "bg-primary text-primary-foreground"}`}>
             {unreadCount > 99 ? "99+" : unreadCount}
           </span>
         )}
@@ -57,6 +59,8 @@ export default function RoomCard({ room, onClick, unreadCount = 0 }: RoomCardPro
         )}
       </div>
       <div className="flex items-center gap-1 text-muted-foreground shrink-0">
+        {muted && <BellOff className="w-3.5 h-3.5" aria-label="Muted" />}
+        {pinned && <Pin className="w-3.5 h-3.5 rotate-45" aria-label="Pinned" />}
         <Users className="w-3.5 h-3.5" />
         <span className="text-xs">{room.member_count}</span>
         <span className="w-2 h-2 rounded-full bg-primary ml-1" aria-hidden />

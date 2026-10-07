@@ -22,6 +22,7 @@ const ForgotPasswordPage = lazy(() => import("./pages/ForgotPasswordPage"));
 const ResetPasswordPage = lazy(() => import("./pages/ResetPasswordPage"));
 const SetupProfilePage = lazy(() => import("./pages/SetupProfilePage"));
 const ChatRoomPage = lazy(() => import("./pages/ChatRoomPage"));
+const RoomsPage = lazy(() => import("./pages/RoomsPage"));
 const CreateRoomPage = lazy(() => import("./pages/CreateRoomPage"));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage"));
 const ProfilePage = lazy(() => import("./pages/ProfilePage"));
@@ -119,6 +120,7 @@ const App = () => (
               <Route path="/room/:roomId" element={<ProtectedRoute><ChatRoomPage /></ProtectedRoute>} />
               <Route path="/create-room" element={<ProtectedRoute><CreateRoomPage /></ProtectedRoute>} />
               <Route path="/discover" element={<ProtectedRoute><DiscoverPage /></ProtectedRoute>} />
+              <Route path="/rooms" element={<ProtectedRoute><RoomsPage /></ProtectedRoute>} />
               <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
               <Route path="/dms" element={<ProtectedRoute><DMsPage /></ProtectedRoute>} />
               <Route path="/add-friend" element={<ProtectedRoute><AddFriendPage /></ProtectedRoute>} />

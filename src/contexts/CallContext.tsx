@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, useCallback, ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useCallback, ReactNode } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useSocket } from "@/sockets/SocketContext";
 import { toast } from "sonner";
@@ -8,9 +8,20 @@ import * as callsApi from "@/api/calls";
 export type CallType = "voice" | "video";
 export type CallState = "idle" | "calling" | "ringing" | "connected" | "ended";
 
+/** Where a call is in its life, for the on-screen status line. */
+export type CallPhase = "idle" | "incoming" | "calling" | "ringing" | "connecting" | "connected" | "reconnecting";
+
+/** The other person on a 1:1 call. */
+export interface CallPeer {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
 interface IncomingCall {
   from: string;
   name: string;
+  avatarUrl?: string | null;
   type: CallType;
   roomId: string;
   callId: string;
@@ -21,6 +32,9 @@ export interface RemoteParticipant {
   peerId: string;
   name: string;
   stream: MediaStream | null;
+  /** They turned their camera off / muted themselves (told to us over the call signal). */
+  cameraOff?: boolean;
+  muted?: boolean;
 }
 
 interface CallContextValue {
@@ -28,6 +42,15 @@ interface CallContextValue {
   callType: CallType;
   callRoomId: string | null;
   incomingCall: IncomingCall | null;
+  /** Who we're talking to (name + photo), for both outgoing and incoming calls. */
+  peer: CallPeer | null;
+  /** Finer-grained than callState: calling / ringing / connecting / connected / reconnecting. */
+  callPhase: CallPhase;
+  /** When media started flowing (ms since epoch); drives the call timer. */
+  connectedAt: number | null;
+  isFrontCamera: boolean;
+  canSwitchCamera: boolean;
+  switchCamera: () => Promise<void>;
   isMuted: boolean;
   isCameraOff: boolean;
   isScreenSharing: boolean;
@@ -36,7 +59,7 @@ interface CallContextValue {
   localVideoRef: React.RefObject<HTMLVideoElement>;
   remoteVideoRef: React.RefObject<HTMLVideoElement>; // legacy single-peer (1st participant)
   remoteAudioRef: React.RefObject<HTMLAudioElement>; // legacy single-peer
-  startCall: (roomId: string, peerId: string, peerName: string, type: CallType) => Promise<void>;
+  startCall: (roomId: string, peerId: string, peerName: string, type: CallType, peerAvatarUrl?: string | null) => Promise<void>;
   addParticipant: (peerId: string, peerName: string) => Promise<void>;
   answerCall: () => Promise<void>;
   endCall: () => void;
@@ -68,7 +91,19 @@ const CALLER_GIVE_UP_MS = 50_000;
 // A brief network drop (wifi <-> mobile data, a tunnel) shouldn't end the call: wait this long before giving up on a peer.
 const PEER_RECONNECT_GRACE_MS = 12_000;
 
+// Once both sides have picked up, media must start flowing within this long or we stop and say so,
+// instead of leaving a screen stuck on "Connecting…" forever.
+const CONNECT_TIMEOUT_MS = 30_000;
+
 const MAX_PARTICIPANTS = 3; // max 4-way (self + 3 others)
+
+// Video quality: 720p at up to 30 fps. The bitrate cap keeps a 1:1 call smooth on ordinary mobile data and is
+// lowered when there are several people (each sends a separate stream to every other participant).
+const VIDEO_CONSTRAINTS = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } } as const;
+const MAX_VIDEO_BITRATE_1TO1 = 1_400_000;
+const MAX_VIDEO_BITRATE_GROUP = 600_000;
+
+type WakeLockHandle = { release: () => Promise<void>; addEventListener: (type: "release", cb: () => void) => void };
 
 interface PeerEntry {
   pc: RTCPeerConnection;
@@ -107,6 +142,14 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
   const [participants, setParticipants] = useState<RemoteParticipant[]>([]);
+  const [peer, setPeer] = useState<CallPeer | null>(null);
+  const [ringingAck, setRingingAck] = useState(false); // caller: the other person's app is reachable and ringing
+  const [answered, setAnswered] = useState(false); // someone picked up; waiting for media to flow
+  const [reconnecting, setReconnecting] = useState(false);
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  const [facing, setFacing] = useState<"user" | "environment">("user");
+  const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
+  const [remoteMedia, setRemoteMedia] = useState<Record<string, { cameraOff: boolean; muted: boolean }>>({});
 
   const peersRef = useRef<Map<string, PeerEntry>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -126,6 +169,8 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const callRoomIdRef = useRef<string | null>(null);
   const handledCallIdsRef = useRef<Set<string>>(new Set());
   const ringTimeoutRef = useRef<number | null>(null);
+  const connectTimeoutRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<WakeLockHandle | null>(null);
   const iceServersRef = useRef<RTCIceServer[]>(FALLBACK_ICE_SERVERS);
   const roleRef = useRef<"caller" | "callee" | null>(null);
   const peerAnsweredRef = useRef(false); // caller side: the callee has picked up (so don't give up on "no answer")
@@ -310,6 +355,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
       window.clearTimeout(ringTimeoutRef.current);
       ringTimeoutRef.current = null;
     }
+    if (connectTimeoutRef.current) {
+      window.clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
     const activeCallId = callIdRef.current ?? incomingCallRef.current?.callId;
     const activeRoomId = callRoomIdRef.current ?? incomingCallRef.current?.roomId;
     markCallHandled(activeCallId);
@@ -342,6 +391,13 @@ export function CallProvider({ children }: { children: ReactNode }) {
     setCallState("idle");
     setCallRoomId(null);
     setIncomingCall(null);
+    setPeer(null);
+    setRingingAck(false);
+    setAnswered(false);
+    setReconnecting(false);
+    setConnectedAt(null);
+    setFacing("user");
+    setRemoteMedia({});
     setIsMuted(false);
     setIsCameraOff(false);
     setIsScreenSharing(false);
@@ -356,6 +412,55 @@ export function CallProvider({ children }: { children: ReactNode }) {
     if (!socket || !callIdRef.current) return;
     socket.emit("call:signal", { callId: callIdRef.current, to, signal });
   }, [socket]);
+
+  // Our side is ready and the other side has picked up; if no media flows in time, stop instead of hanging.
+  const armConnectTimeout = useCallback(() => {
+    if (connectTimeoutRef.current) window.clearTimeout(connectTimeoutRef.current);
+    connectTimeoutRef.current = window.setTimeout(() => {
+      connectTimeoutRef.current = null;
+      if (callStateRef.current === "idle" || callStateRef.current === "connected") return;
+      toast.error("Couldn't connect the call. Check your connection and try again.");
+      peersRef.current.forEach((_entry, peerId) => sendSignal(peerId, { type: "leave" }));
+      finalizeCallLog();
+      cleanup();
+    }, CONNECT_TIMEOUT_MS);
+  }, [sendSignal, finalizeCallLog, cleanup]);
+
+  // Media is really flowing: stop ringing, start the timer, clear any "reconnecting" notice.
+  const markConnected = useCallback(() => {
+    stopRingtone();
+    if (connectTimeoutRef.current) { window.clearTimeout(connectTimeoutRef.current); connectTimeoutRef.current = null; }
+    if (!connectedAtRef.current) { connectedAtRef.current = Date.now(); setConnectedAt(connectedAtRef.current); }
+    setReconnecting(false);
+    if (callStateRef.current !== "connected") { callStateRef.current = "connected"; setCallState("connected"); }
+  }, [stopRingtone]);
+
+  // Tell the other side(s) whether our mic / camera are on, so they can show "camera off" instead of a frozen frame.
+  const broadcastMediaState = useCallback((onlyTo?: string) => {
+    const stream = localStreamRef.current;
+    const payload = {
+      type: "media-state",
+      mic: stream?.getAudioTracks()[0]?.enabled !== false,
+      camera: stream?.getVideoTracks()[0]?.enabled !== false,
+    };
+    if (onlyTo) sendSignal(onlyTo, payload);
+    else peersRef.current.forEach((_entry, peerId) => sendSignal(peerId, payload));
+  }, [sendSignal]);
+
+  // Cap video bitrate / prefer smooth motion once connected.
+  const tuneVideoSenders = useCallback((pc: RTCPeerConnection) => {
+    const maxBitrate = peersRef.current.size > 1 ? MAX_VIDEO_BITRATE_GROUP : MAX_VIDEO_BITRATE_1TO1;
+    pc.getSenders().forEach((sender) => {
+      if (sender.track?.kind !== "video") return;
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+        params.encodings[0].maxBitrate = maxBitrate;
+        (params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference = "maintain-framerate";
+        void sender.setParameters(params).catch(() => {});
+      } catch { /* not supported: browser defaults apply */ }
+    });
+  }, []);
 
   // ---------- Create a peer entry ----------
   const createPeer = useCallback((peerId: string, name: string, initiator = false): PeerEntry => {
@@ -384,11 +489,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       } else if (!entry.stream.getTracks().some((t) => t.id === e.track.id)) {
         entry.stream.addTrack(e.track);
       }
-      stopRingtone();
-      if (callStateRef.current !== "connected") {
-        callStateRef.current = "connected";
-        setCallState("connected");
-      }
+      // (Media arriving doesn't mean the connection is up yet; "connected" is set when ICE actually connects.)
       refreshParticipantsState();
     };
 
@@ -437,14 +538,16 @@ export function CallProvider({ children }: { children: ReactNode }) {
       if (st === "connected") {
         if (cur.giveUpTimer) { window.clearTimeout(cur.giveUpTimer); cur.giveUpTimer = null; }
         cur.restartAttempted = false;
-        stopRingtone();
-        if (!connectedAtRef.current) connectedAtRef.current = Date.now();
-        if (callStateRef.current !== "connected") { callStateRef.current = "connected"; setCallState("connected"); }
+        markConnected();
+        tuneVideoSenders(pc);
+        broadcastMediaState(peerId);
       } else if (st === "disconnected") {
-        // Usually a blink (network handover). Give it a moment to recover on its own, then try a restart.
+        // Usually a blink (network handover). Show "Reconnecting…", give it a moment to recover, then try a restart.
+        if (callStateRef.current === "connected") setReconnecting(true);
         armGiveUp();
         window.setTimeout(() => { if (pc.connectionState === "disconnected") void tryIceRestart(); }, 3000);
       } else if (st === "failed") {
+        if (callStateRef.current === "connected") setReconnecting(true);
         armGiveUp();
         void tryIceRestart();
       } else if (st === "closed") {
@@ -452,10 +555,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       }
     };
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        stopRingtone();
-        if (callStateRef.current !== "connected") setCallState("connected");
-      }
+      if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") markConnected();
     };
 
     const local = localStreamRef.current;
@@ -467,23 +567,54 @@ export function CallProvider({ children }: { children: ReactNode }) {
     if (early) { entry.pendingCandidates.push(...early); earlyIceRef.current.delete(peerId); }
     peersRef.current.set(peerId, entry);
     return entry;
-  }, [sendSignal, refreshParticipantsState, stopRingtone, finalizeCallLog, cleanup]);
+  }, [sendSignal, refreshParticipantsState, markConnected, tuneVideoSenders, broadcastMediaState, finalizeCallLog, cleanup]);
 
   // ---------- Get local media (idempotent) ----------
   const ensureLocalStream = useCallback(async (type: CallType): Promise<MediaStream> => {
     if (localStreamRef.current) return localStreamRef.current;
     const constraints: MediaStreamConstraints = {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: type === "video" ? { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } } : false,
+      video: type === "video" ? { facingMode: "user", ...VIDEO_CONSTRAINTS } : false,
     };
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     localStreamRef.current = stream;
+    stream.getVideoTracks().forEach((t) => { try { t.contentHint = "motion"; } catch { /* ignore */ } });
     attachLocalStream(stream);
+    if (type === "video") {
+      void navigator.mediaDevices.enumerateDevices().then((d) => setHasMultipleCameras(d.filter((x) => x.kind === "videoinput").length > 1)).catch(() => {});
+    }
     return stream;
   }, [attachLocalStream]);
 
+  // Front <-> back camera (phones/tablets). The new camera is swapped into the live call without renegotiating.
+  const switchCamera = useCallback(async () => {
+    const local = localStreamRef.current;
+    if (!local || callTypeRef.current !== "video") return;
+    if (screenStreamRef.current) { toast.info("Stop sharing your screen to switch cameras."); return; }
+    const next = facing === "user" ? "environment" : "user";
+    try {
+      const fresh = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: next }, ...VIDEO_CONSTRAINTS }, audio: false });
+      const newTrack = fresh.getVideoTracks()[0];
+      if (!newTrack) return;
+      const old = local.getVideoTracks()[0];
+      newTrack.enabled = old ? old.enabled : true;
+      try { newTrack.contentHint = "motion"; } catch { /* ignore */ }
+      peersRef.current.forEach((entry) => {
+        const sender = entry.pc.getSenders().find((x) => x.track?.kind === "video");
+        if (sender) void sender.replaceTrack(newTrack);
+      });
+      if (old) { local.removeTrack(old); old.stop(); }
+      local.addTrack(newTrack);
+      cameraTrackRef.current = newTrack;
+      attachLocalStream(local);
+      setFacing(next);
+    } catch {
+      toast.error("Couldn't switch the camera.");
+    }
+  }, [facing, attachLocalStream]);
+
   // ---------- Start a call (initiator) ----------
-  const startCall = useCallback(async (roomId: string, peerId: string, peerName: string, type: CallType) => {
+  const startCall = useCallback(async (roomId: string, peerId: string, peerName: string, type: CallType, peerAvatarUrl?: string | null) => {
     if (!user || callStateRef.current !== "idle") return;
     if (!hasCallPermission(type)) {
       toast.error(callPermissionDenialMessage(type));
@@ -496,6 +627,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
     roleRef.current = "caller";
     peerAnsweredRef.current = false;
     initialPeerIdRef.current = peerId;
+    setPeer({ id: peerId, name: peerName, avatarUrl: peerAvatarUrl ?? null }); // so the call screen shows who we're calling
+    setRingingAck(false);
+    setAnswered(false);
     setCallType(type);
     setCallRoomId(roomId);
     setCallState("calling");
@@ -636,6 +770,9 @@ export function CallProvider({ children }: { children: ReactNode }) {
     callLogIdRef.current = answeringCall.callId;
     roleRef.current = "callee";
     initialPeerIdRef.current = answeringCall.from;
+    setPeer({ id: answeringCall.from, name: answeringCall.name, avatarUrl: answeringCall.avatarUrl ?? null });
+    setAnswered(true);
+    armConnectTimeout(); // if media never flows, stop with a message instead of hanging on "Connecting…"
 
     // Record the answer on the server right away (it also stops this call ringing on the user's other devices),
     // instead of waiting for the end of the call, which never came if the app was closed mid-call.
@@ -665,7 +802,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       }
       cleanup();
     }
-  }, [incomingCall, user, socket, hasCallPermission, finalizeCallLog, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, createPeer, cleanup]);
+  }, [incomingCall, user, socket, hasCallPermission, finalizeCallLog, markCallHandled, closeCallNotifications, stopRingtone, ensureLocalStream, createPeer, armConnectTimeout, cleanup]);
 
   const endCall = useCallback(() => {
     peersRef.current.forEach((_entry, peerId) => sendSignal(peerId, { type: "leave" }));
@@ -694,13 +831,13 @@ export function CallProvider({ children }: { children: ReactNode }) {
 
   const toggleMute = useCallback(() => {
     const t = localStreamRef.current?.getAudioTracks()[0];
-    if (t) { t.enabled = !t.enabled; setIsMuted(!t.enabled); }
-  }, []);
+    if (t) { t.enabled = !t.enabled; setIsMuted(!t.enabled); broadcastMediaState(); }
+  }, [broadcastMediaState]);
 
   const toggleCamera = useCallback(() => {
     const t = localStreamRef.current?.getVideoTracks()[0];
-    if (t) { t.enabled = !t.enabled; setIsCameraOff(!t.enabled); }
-  }, []);
+    if (t) { t.enabled = !t.enabled; setIsCameraOff(!t.enabled); broadcastMediaState(); }
+  }, [broadcastMediaState]);
 
   const toggleSpeaker = useCallback(async () => {
     const next = !isSpeakerOn;
@@ -807,6 +944,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       setIncomingCall({
         from: payload.callerId,
         name: payload.callerName,
+        avatarUrl: payload.callerAvatarUrl ?? null,
         type: payload.callType,
         roomId: payload.roomId,
         callId: payload.callId,
@@ -873,7 +1011,16 @@ export function CallProvider({ children }: { children: ReactNode }) {
           await entry.pc.setLocalDescription(answer);
           sendSignal(from, { type: "answer", sdp: answer, restart: true });
         }
+      } else if (signal.type === "media-state") {
+        setRemoteMedia((prev) => ({ ...prev, [from]: { cameraOff: signal.camera === false, muted: signal.mic === false } }));
       } else if (signal.type === "answer" && entry) {
+        if (!peerAnsweredRef.current) {
+          // They picked up: the ringback stops and we wait (up to a limit) for the connection.
+          peerAnsweredRef.current = true;
+          stopRingtone();
+          setAnswered(true);
+          armConnectTimeout();
+        }
         peerAnsweredRef.current = true;
         await entry.pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
         entry.hasRemoteDesc = true;
@@ -918,6 +1065,13 @@ export function CallProvider({ children }: { children: ReactNode }) {
     // hangs up or someone answers on another device.
     const onUpdated = (row: { id: string; status: string; caller_id: string; callee_id: string }) => {
       if (row.id !== callIdRef.current) return;
+      // Picked up on another one of my devices: stop ringing here (this device didn't answer, it's still on the ring screen).
+      if (row.status === "answered" && row.callee_id === user.id && callStateRef.current === "ringing" && incomingCallRef.current?.callId === row.id) {
+        toast.info("Call answered on another device");
+        markCallHandled(row.id);
+        cleanup();
+        return;
+      }
       const over = row.status === "declined" || row.status === "missed" || row.status === "cancelled";
       if (!over) return;
       if (callStateRef.current === "calling" && !peerAnsweredRef.current && row.caller_id === user.id) {
@@ -937,20 +1091,69 @@ export function CallProvider({ children }: { children: ReactNode }) {
     if (socket.connected) askForPendingCalls();
     socket.on("call:updated", onUpdated);
 
+    // The server tells the caller whether the other person's app is reachable (-> "Ringing…") or not (-> "Calling…").
+    const onRinging = (d: { callId: string; reachable: boolean }) => {
+      if (d.callId === callIdRef.current && callStateRef.current === "calling" && !peerAnsweredRef.current) setRingingAck(Boolean(d.reachable));
+    };
+    socket.on("call:ringing", onRinging);
+
     socket.on("call:invite", onInvite);
     socket.on("call:signal", onSignal);
     return () => {
       socket.off("call:invite", onInvite);
       socket.off("call:signal", onSignal);
       socket.off("call:updated", onUpdated);
+      socket.off("call:ringing", onRinging);
       socket.off("connect", askForPendingCalls);
     };
-  }, [socket, user, hasCallPermission, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, ensureLocalStream, refreshIceServers, createPeer, sendSignal, refreshParticipantsState, finalizeCallLog, cleanup]);
+  }, [socket, user, hasCallPermission, stopRingtone, playLoopingAudio, startVibrationLoop, closeCallNotifications, markCallHandled, ensureLocalStream, refreshIceServers, createPeer, sendSignal, refreshParticipantsState, armConnectTimeout, finalizeCallLog, cleanup]);
+
+  // Keep the screen awake during a video call (a phone left untouched would otherwise lock mid-call).
+  useEffect(() => {
+    if (callState === "idle" || callType !== "video") return;
+    let released = false;
+    const nav = navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<WakeLockHandle> } };
+    const acquire = async () => {
+      if (released || wakeLockRef.current || !nav.wakeLock) return;
+      try {
+        const lock = await nav.wakeLock.request("screen");
+        if (released) { void lock.release().catch(() => {}); return; }
+        wakeLockRef.current = lock;
+        lock.addEventListener("release", () => { if (wakeLockRef.current === lock) wakeLockRef.current = null; });
+      } catch { /* not allowed (low battery / unsupported): the call still works */ }
+    };
+    void acquire();
+    const onVisible = () => { if (document.visibilityState === "visible") void acquire(); }; // the lock is dropped when the tab is hidden
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      released = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      void wakeLockRef.current?.release().catch(() => {});
+      wakeLockRef.current = null;
+    };
+  }, [callState, callType]);
+
+  const participantsView = useMemo<RemoteParticipant[]>(
+    () => participants.map((p) => ({ ...p, ...(remoteMedia[p.peerId] ?? {}) })),
+    [participants, remoteMedia]
+  );
+
+  const callPhase: CallPhase =
+    callState === "idle" ? "idle"
+    : callState === "ringing" ? "incoming"
+    : callState === "connected" ? (reconnecting ? "reconnecting" : "connected")
+    : answered ? "connecting"
+    : ringingAck ? "ringing"
+    : "calling";
 
   return (
     <CallContext.Provider value={{
       callState, callType, callRoomId, incomingCall, isMuted, isCameraOff, isScreenSharing, isSpeakerOn,
-      participants,
+      peer, callPhase, connectedAt,
+      isFrontCamera: facing === "user",
+      canSwitchCamera: callType === "video" && hasMultipleCameras && !isScreenSharing,
+      switchCamera,
+      participants: participantsView,
       localVideoRef, remoteVideoRef, remoteAudioRef,
       startCall, addParticipant, answerCall, endCall, rejectCall,
       toggleMute, toggleCamera, toggleSpeaker, toggleScreenShare,
