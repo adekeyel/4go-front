@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useCallback, ReactNode } from "react";
+import { canShareScreen, SCREEN_SHARE_UNAVAILABLE_MESSAGE } from "@/lib/screenShare";
 import { useAuth } from "@/contexts/AuthContext";
 import { useSocket } from "@/sockets/SocketContext";
 import { toast } from "sonner";
@@ -35,6 +36,8 @@ export interface RemoteParticipant {
   /** They turned their camera off / muted themselves (told to us over the call signal). */
   cameraOff?: boolean;
   muted?: boolean;
+  /** They are sharing their screen (so the picture should be shown whole, never cropped). */
+  sharingScreen?: boolean;
 }
 
 interface CallContextValue {
@@ -102,6 +105,9 @@ const MAX_PARTICIPANTS = 3; // max 4-way (self + 3 others)
 const VIDEO_CONSTRAINTS = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } } as const;
 const MAX_VIDEO_BITRATE_1TO1 = 1_400_000;
 const MAX_VIDEO_BITRATE_GROUP = 600_000;
+const MAX_SCREEN_BITRATE_1TO1 = 2_500_000;
+const MAX_SCREEN_BITRATE_GROUP = 1_200_000;
+const SCREEN_MAX_FPS = 15;
 
 type WakeLockHandle = { release: () => Promise<void>; addEventListener: (type: "release", cb: () => void) => void };
 
@@ -149,7 +155,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [facing, setFacing] = useState<"user" | "environment">("user");
   const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
-  const [remoteMedia, setRemoteMedia] = useState<Record<string, { cameraOff: boolean; muted: boolean }>>({});
+  const [remoteMedia, setRemoteMedia] = useState<Record<string, { cameraOff: boolean; muted: boolean; screen: boolean }>>({});
 
   const peersRef = useRef<Map<string, PeerEntry>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -438,25 +444,34 @@ export function CallProvider({ children }: { children: ReactNode }) {
   // Tell the other side(s) whether our mic / camera are on, so they can show "camera off" instead of a frozen frame.
   const broadcastMediaState = useCallback((onlyTo?: string) => {
     const stream = localStreamRef.current;
+    const sharing = !!screenStreamRef.current;
     const payload = {
       type: "media-state",
       mic: stream?.getAudioTracks()[0]?.enabled !== false,
-      camera: stream?.getVideoTracks()[0]?.enabled !== false,
+      // While sharing the screen, the picture they receive is the screen, whatever the camera switch says.
+      camera: sharing ? true : stream?.getVideoTracks()[0]?.enabled !== false,
+      screen: sharing,
     };
     if (onlyTo) sendSignal(onlyTo, payload);
     else peersRef.current.forEach((_entry, peerId) => sendSignal(peerId, payload));
   }, [sendSignal]);
 
-  // Cap video bitrate / prefer smooth motion once connected.
+  // Encoder settings for whatever video we're sending. A camera wants smooth motion at a modest bitrate. A shared
+  // screen is the opposite: text has to stay sharp (keep the resolution, let the frame rate drop) and it needs more bits.
   const tuneVideoSenders = useCallback((pc: RTCPeerConnection) => {
-    const maxBitrate = peersRef.current.size > 1 ? MAX_VIDEO_BITRATE_GROUP : MAX_VIDEO_BITRATE_1TO1;
+    const sharing = !!screenStreamRef.current;
+    const group = peersRef.current.size > 1;
+    const maxBitrate = sharing
+      ? (group ? MAX_SCREEN_BITRATE_GROUP : MAX_SCREEN_BITRATE_1TO1)
+      : (group ? MAX_VIDEO_BITRATE_GROUP : MAX_VIDEO_BITRATE_1TO1);
     pc.getSenders().forEach((sender) => {
       if (sender.track?.kind !== "video") return;
       try {
         const params = sender.getParameters();
         if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
         params.encodings[0].maxBitrate = maxBitrate;
-        (params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference = "maintain-framerate";
+        params.encodings[0].maxFramerate = sharing ? SCREEN_MAX_FPS : undefined;
+        (params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference = sharing ? "maintain-resolution" : "maintain-framerate";
         void sender.setParameters(params).catch(() => {});
       } catch { /* not supported: browser defaults apply */ }
     });
@@ -853,56 +868,65 @@ export function CallProvider({ children }: { children: ReactNode }) {
     }
   }, [isSpeakerOn]);
 
+  // Put the camera back after sharing ends (from our own button or the browser's "Stop sharing" bar).
+  const stopScreenShare = useCallback(() => {
+    const cam = cameraTrackRef.current;
+    peersRef.current.forEach((entry) => {
+      const sender = entry.pc.getSenders().find((s) => s.track?.kind === "video");
+      if (sender && cam) void sender.replaceTrack(cam).then(() => tuneVideoSenders(entry.pc)).catch(() => {});
+    });
+    screenStreamRef.current?.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+    screenStreamRef.current = null;
+    setIsScreenSharing(false);
+    broadcastMediaState(); // tell them the picture is the camera again
+  }, [tuneVideoSenders, broadcastMediaState]);
+
   const toggleScreenShare = useCallback(async () => {
     if (peersRef.current.size === 0) return;
-    const md = navigator.mediaDevices as MediaDevices & { getDisplayMedia?: (c: MediaStreamConstraints) => Promise<MediaStream> };
-    if (!md || typeof md.getDisplayMedia !== "function") {
-      toast.error("Screen sharing isn't supported on this device/browser. Try desktop Chrome, Edge or Firefox.");
+    if (isScreenSharing) { stopScreenShare(); return; }
+
+    // Phones and tablets can't send their screen from a browser (see lib/screenShare.ts): say so plainly.
+    if (!canShareScreen()) {
+      toast.info(SCREEN_SHARE_UNAVAILABLE_MESSAGE);
       return;
     }
     if (!window.isSecureContext) {
       toast.error("Screen sharing requires a secure (HTTPS) connection.");
       return;
     }
-    if (isScreenSharing) {
-      const cam = cameraTrackRef.current;
-      peersRef.current.forEach((entry) => {
-        const sender = entry.pc.getSenders().find((s) => s.track?.kind === "video");
-        if (sender && cam) void sender.replaceTrack(cam);
-      });
-      screenStreamRef.current?.getTracks().forEach((t) => t.stop());
-      screenStreamRef.current = null;
-      setIsScreenSharing(false);
-      return;
-    }
+    const startedAt = performance.now();
     try {
-      const display = await md.getDisplayMedia!({ video: true, audio: false });
+      // No width/height limits: capture the screen at its real size and let the encoder scale it to the connection.
+      const display = await (navigator.mediaDevices as MediaDevices & { getDisplayMedia: (c: unknown) => Promise<MediaStream> }).getDisplayMedia({
+        video: { frameRate: { ideal: SCREEN_MAX_FPS, max: 30 }, cursor: "always" },
+        audio: false,
+      });
       const screenTrack = display.getVideoTracks()[0];
       if (!screenTrack) return;
+      try { screenTrack.contentHint = "detail"; } catch { /* hint is optional */ }
       const first = peersRef.current.values().next().value as PeerEntry | undefined;
       const camSender = first?.pc.getSenders().find((s) => s.track?.kind === "video");
-      cameraTrackRef.current = camSender?.track ?? null;
+      cameraTrackRef.current = camSender?.track ?? cameraTrackRef.current;
       screenStreamRef.current = display;
       peersRef.current.forEach((entry) => {
         const sender = entry.pc.getSenders().find((s) => s.track?.kind === "video");
-        if (sender) void sender.replaceTrack(screenTrack);
+        if (sender) void sender.replaceTrack(screenTrack).then(() => tuneVideoSenders(entry.pc)).catch(() => {});
       });
       setIsScreenSharing(true);
-      screenTrack.onended = () => {
-        const cam = cameraTrackRef.current;
-        peersRef.current.forEach((entry) => {
-          const sender = entry.pc.getSenders().find((s) => s.track?.kind === "video");
-          if (sender && cam) void sender.replaceTrack(cam);
-        });
-        screenStreamRef.current = null;
-        setIsScreenSharing(false);
-      };
+      broadcastMediaState(); // tell them a screen is coming, so it's shown whole instead of cropped like a camera
+      screenTrack.onended = () => stopScreenShare();
     } catch (err) {
       const e = err as DOMException;
-      if (e?.name === "NotAllowedError") toast.info("Screen share cancelled.");
-      else toast.error(`Screen share failed: ${e?.message || "unknown error"}`);
+      if (e?.name === "NotAllowedError") {
+        // A refusal with no picker ever shown (well under half a second) on a touch device is the browser saying
+        // "not supported here" (e.g. Android Chrome in "desktop site" mode), not the person pressing Cancel.
+        const instant = performance.now() - startedAt < 400 && navigator.maxTouchPoints > 0;
+        toast.info(instant ? SCREEN_SHARE_UNAVAILABLE_MESSAGE : "Screen share cancelled.");
+      } else {
+        toast.error(`Screen share failed: ${e?.message || "unknown error"}`);
+      }
     }
-  }, [isScreenSharing]);
+  }, [isScreenSharing, stopScreenShare, tuneVideoSenders, broadcastMediaState]);
 
   // ---------- Global socket listener for incoming calls & signaling ----------
   // Unlike the old per-DM-room Supabase channel subscriptions, the backend
@@ -1012,7 +1036,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           sendSignal(from, { type: "answer", sdp: answer, restart: true });
         }
       } else if (signal.type === "media-state") {
-        setRemoteMedia((prev) => ({ ...prev, [from]: { cameraOff: signal.camera === false, muted: signal.mic === false } }));
+        setRemoteMedia((prev) => ({ ...prev, [from]: { cameraOff: signal.camera === false, muted: signal.mic === false, screen: signal.screen === true } }));
       } else if (signal.type === "answer" && entry) {
         if (!peerAnsweredRef.current) {
           // They picked up: the ringback stops and we wait (up to a limit) for the connection.
@@ -1134,7 +1158,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
   }, [callState, callType]);
 
   const participantsView = useMemo<RemoteParticipant[]>(
-    () => participants.map((p) => ({ ...p, ...(remoteMedia[p.peerId] ?? {}) })),
+    () => participants.map((p) => {
+      const m = remoteMedia[p.peerId];
+      return m ? { ...p, cameraOff: m.cameraOff, muted: m.muted, sharingScreen: m.screen } : p;
+    }),
     [participants, remoteMedia]
   );
 

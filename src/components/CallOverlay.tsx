@@ -1,4 +1,5 @@
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Volume2, VolumeX, MonitorUp, MonitorOff, UserPlus, SwitchCamera } from "lucide-react";
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Volume2, VolumeX, MonitorUp, MonitorOff, UserPlus, SwitchCamera, Maximize2, Minimize2 } from "lucide-react";
+import { canShareScreen } from "@/lib/screenShare";
 import type { CallPeer, CallPhase, CallState, CallType, RemoteParticipant } from "@/contexts/CallContext";
 import { RefObject, useEffect, useRef, useState } from "react";
 
@@ -109,7 +110,7 @@ function ParticipantTile({ p, isVideo }: { p: RemoteParticipant; isVideo: boolea
   return (
     <div className="relative bg-white/10 rounded-xl overflow-hidden min-h-[8rem]">
       {isVideo && hasVideo ? (
-        <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+        <video ref={videoRef} autoPlay playsInline className={`w-full h-full ${p.sharingScreen ? "object-contain bg-black" : "object-cover"}`} />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-2">
           <CallAvatar name={p.name} size={56} />
@@ -133,6 +134,9 @@ export default function CallOverlay({
   onAddParticipant, canAddParticipant,
 }: CallOverlayProps) {
   const timer = useCallTimer(phase === "connected" || phase === "reconnecting" ? connectedAt : null);
+  // While someone is sharing their screen it is shown whole ("fit"). Tapping the button fills the area instead
+  // (which crops the edges), for a small phone screen where the whole desktop would be tiny.
+  const [fillScreen, setFillScreen] = useState(false);
   if (callState === "idle") return null;
 
   const darkBg = "bg-gradient-to-b from-[#0f5c54] via-[#0b2b2a] to-[#0b141a]";
@@ -171,7 +175,9 @@ export default function CallOverlay({
   const waiting = phase === "calling" || phase === "ringing" || phase === "connecting";
   const remoteHasVideo = !!first?.stream && first.stream.getVideoTracks().length > 0 && !first.cameraOff && !waiting;
   // While waiting for the other person, show MY camera full-screen (like WhatsApp); once connected it shrinks to a corner.
-  const selfFull = callType === "video" && !isGroup && waiting && !isCameraOff;
+  const remoteSharing = !!first?.sharingScreen && remoteHasVideo;
+  const selfFull = callType === "video" && !isGroup && waiting && !isCameraOff && !isScreenSharing;
+  const shareSupported = canShareScreen(); // phones/tablets can watch a shared screen but not send one
   const mirror = isFrontCamera && !isScreenSharing;
 
   const controls = (
@@ -185,7 +191,9 @@ export default function CallOverlay({
       )}
       <RoundButton onClick={onToggleMute} label={isMuted ? "Unmute" : "Mute"} active={isMuted}>{isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}</RoundButton>
       {callType === "video" && (
-        <RoundButton onClick={onToggleScreenShare} label={isScreenSharing ? "Stop sharing" : "Share screen"} active={isScreenSharing}>{isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <MonitorUp className="w-5 h-5" />}</RoundButton>
+        <span className={shareSupported || isScreenSharing ? "" : "opacity-50"}>
+          <RoundButton onClick={onToggleScreenShare} label={isScreenSharing ? "Stop sharing" : shareSupported ? "Share screen" : "Share screen (not available on phones)"} active={isScreenSharing}>{isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <MonitorUp className="w-5 h-5" />}</RoundButton>
+        </span>
       )}
       {canAddParticipant && onAddParticipant && (
         <RoundButton onClick={onAddParticipant} label="Add participant"><UserPlus className="w-5 h-5" /></RoundButton>
@@ -198,6 +206,7 @@ export default function CallOverlay({
     <div className={`absolute inset-x-0 top-0 z-20 px-4 pt-[max(2rem,env(safe-area-inset-top))] pb-8 text-center text-white ${callType === "video" ? "bg-gradient-to-b from-black/60 to-transparent" : ""}`}>
       <h2 className="text-xl font-semibold truncate">{isGroup ? `${participants.length + 1} people` : name}</h2>
       <p className={`text-sm tabular-nums ${phase === "reconnecting" ? "text-yellow-300" : "text-white/75"}`}>{statusLabel(phase, timer)}</p>
+      {remoteSharing && <p className="text-xs text-white/80 mt-0.5">{name} is sharing their screen</p>}
     </div>
   );
 
@@ -212,7 +221,7 @@ export default function CallOverlay({
             </div>
           ) : (
             <>
-              <video ref={remoteVideoRef} autoPlay playsInline className={`absolute inset-0 w-full h-full object-cover transition-opacity ${remoteHasVideo ? "opacity-100" : "opacity-0"}`} />
+              <video ref={remoteVideoRef} autoPlay playsInline className={`absolute inset-0 w-full h-full transition-opacity ${remoteHasVideo ? "opacity-100" : "opacity-0"} ${remoteSharing && !fillScreen ? "object-contain bg-black" : "object-cover"}`} />
               {!remoteHasVideo && !selfFull && (
                 <div className={`absolute inset-0 flex flex-col items-center justify-center gap-3 ${darkBg}`}>
                   <CallAvatar name={name} url={peer?.avatarUrl} size={144} pulse={waiting} />
@@ -229,12 +238,31 @@ export default function CallOverlay({
             muted
             style={{ transform: mirror ? "scaleX(-1)" : undefined }}
             className={
-              selfFull
+              isScreenSharing
+                ? "hidden"
+                : selfFull
                 ? "absolute inset-0 w-full h-full object-cover"
                 : "absolute right-3 top-24 z-10 w-28 h-40 rounded-2xl object-cover border border-white/30 shadow-lg bg-black"
             }
           />
-          {isCameraOff && !selfFull && !isGroup && (
+          {isScreenSharing && (
+            <div className="absolute inset-x-0 top-24 z-20 flex justify-center px-4">
+              <button onClick={onToggleScreenShare} className="flex items-center gap-2 rounded-full bg-red-500 px-4 py-2 text-sm font-semibold text-white shadow-lg active:scale-95">
+                <MonitorOff className="w-4 h-4" />You're sharing your screen · Stop
+              </button>
+            </div>
+          )}
+          {remoteSharing && (
+            <button
+              onClick={() => setFillScreen((v) => !v)}
+              aria-label={fillScreen ? "Fit whole screen" : "Fill the area"}
+              title={fillScreen ? "Fit whole screen" : "Fill the area"}
+              className="absolute left-3 top-24 z-20 w-10 h-10 rounded-full bg-black/60 text-white flex items-center justify-center"
+            >
+              {fillScreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+            </button>
+          )}
+          {isCameraOff && !selfFull && !isGroup && !isScreenSharing && (
             <div className="absolute right-3 top-24 z-10 w-28 h-40 rounded-2xl bg-black/70 flex items-center justify-center pointer-events-none"><VideoOff className="w-6 h-6 text-white/80" /></div>
           )}
           {header}
