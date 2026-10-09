@@ -192,7 +192,7 @@ export default function AboutPage() {
             </p>
             <p><strong className="text-foreground">Country:</strong> Nigeria</p>
             <p><strong className="text-foreground">Website:</strong>{" "}
-              <a href="https://4go.com.ng" target="_blank" rel="noopener noreferrer" className="text-primary underline">
+              <a href="https://www.4go.com.ng" target="_blank" rel="noopener noreferrer" className="text-primary underline">
                 https://www.4go.com.ng
               </a>
             </p>
